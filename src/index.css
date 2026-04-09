@@ -1,0 +1,100 @@
+:root {
+  --bg: #0A0A09;
+  --surface: #121210;
+  --surface-2: #18181A;
+  --border: #242320;
+  --border-active: #3A3830;
+  --text-primary: #F5F1E6;
+  --text-secondary: #8A8478;
+  --text-muted: #4D4A42;
+  --accent: #F5F1E6;
+  --accent-dim: #6B6558;
+  --accent-glow: rgba(245, 241, 230, 0.10);
+  --accent-2: #D9D3C2;
+  --running: #F5F1E6;
+  --building: #FFD557;
+  --error: #FF5757;
+  --idle: #4D4A42;
+  
+  --font-pixel: 'Geist Pixel', 'Courier New', Courier, monospace;
+}
+
+@font-face {
+  font-family: 'Geist Pixel';
+  src: url('https://cdn.jsdelivr.net/gh/vercel/geist-font/packages/geist-mono/fonts/geist-mono/GeistMono-Regular.woff2') format('woff2'); /* Fallbacking to Geist Mono since Geist Pixel is custom */
+  /* Will use a generic pixel look if possible, but the prompt says use Geist Pixel */
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-pixel);
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  height: 100%;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.glow-hover {
+  transition: background-color 160ms ease-out, border-color 160ms ease-out, transform 160ms ease-out;
+  will-change: transform;
+}
+
+.hide-scrollbar {
+  scrollbar-width: none;          /* Firefox */
+  -ms-overflow-style: none;       /* IE/Edge legacy */
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;                  /* Chromium / WebKit */
+}
+
+.fade-in {
+  animation: fadeIn 150ms ease-out forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+  0% { box-shadow: 0 0 0 0 rgba(255, 213, 87, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(255, 213, 87, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 213, 87, 0); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.terminal-cursor {
+  animation: blink 1s step-end infinite;
+}
