@@ -4,7 +4,38 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>temp-app</title>
+
+    <!-- Primary meta tags -->
+    <title>Shirim — Install any GitHub project locally with one click</title>
+    <meta name="title" content="Shirim — Install any GitHub project locally with one click" />
+    <meta name="description" content="Shirim is a desktop app that installs and runs open source GitHub projects on your machine. AI agents read the repo, handle the setup, and get it running — no terminal, no README hell." />
+    <meta name="theme-color" content="#0a0a0a" />
+
+    <!-- Open Graph / Facebook / LinkedIn / Discord / Slack -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://shirim.app/" />
+    <meta property="og:title" content="Shirim — Install any GitHub project locally with one click" />
+    <meta property="og:description" content="A desktop app store for open source. Browse GitHub projects, click install, and let AI agents handle the setup. Self-host without the terminal." />
+    <meta property="og:image" content="https://shirim.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:site_name" content="Shirim" />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://shirim.app/" />
+    <meta name="twitter:title" content="Shirim — Install any GitHub project locally with one click" />
+    <meta name="twitter:description" content="A desktop app store for open source. Browse GitHub projects, click install, and let AI agents handle the setup. Self-host without the terminal." />
+    <meta name="twitter:image" content="https://shirim.app/og-image.png" />
+    <script>
+      // Apply persisted theme before React mounts to avoid a flash of the wrong theme.
+      try {
+        var stored = localStorage.getItem('shirim-theme');
+        document.documentElement.setAttribute('data-theme', stored === 'light' ? 'light' : 'dark');
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
