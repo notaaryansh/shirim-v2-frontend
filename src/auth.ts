@@ -14,7 +14,7 @@ export const AUTH_API_BASE = 'http://localhost:8001';
  *
  * Flip this to `false` when you're ready to hit the real backend again.
  */
-export const DEV_BYPASS_AUTH = true;
+export const DEV_BYPASS_AUTH = false;
 
 const ACCESS_TOKEN_KEY = 'shirim-access-token';
 const REFRESH_TOKEN_KEY = 'shirim-refresh-token';

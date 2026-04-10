@@ -141,6 +141,14 @@ body {
   animation: otp-shake 260ms ease-out;
 }
 
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.28; transform: scale(0.9); }
+  50%      { opacity: 1;    transform: scale(1); }
+}
+.pulse-dot {
+  animation: pulse-soft 2.2s ease-in-out infinite;
+}
+
 .terminal-cursor {
   animation: blink 1s step-end infinite;
 }

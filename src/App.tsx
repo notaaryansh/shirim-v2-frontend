@@ -1,9 +1,18 @@
 import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, Square, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle } from 'lucide-react';
+import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle, Check } from 'lucide-react';
 import {
   fetchHome, fetchDiscover, fetchRepoDetail,
-  type Repository, type RepoDetail,
+  kickInstall, fetchInstallProgress, cancelInstall, deleteInstall,
+  searchRepos,
+  type Repository, type RepoDetail, type InstallProgress, type InstallStep, type StepStatus,
 } from './api';
+import {
+  getInstalls, addInstall, removeInstall, snapshotFromDetail, formatRelative,
+  type InstalledEntry,
+} from './installs';
+import {
+  getCachedDetail, hasCachedDetail, setCachedDetail, preloadImages,
+} from './detailCache';
 import {
   isAuthenticated, setSession, setUser, signOut, sendOtp, verifyOtp, fetchMe, getUser,
 } from './auth';
@@ -162,14 +171,117 @@ const VIEW_CATEGORIES: Record<'Home' | 'Discover' | 'Installed' | 'Settings', st
   Settings: [],
 };
 
-const INSTALLED_REPOS = [
-  { id: 1, name: 'next.js', desc: 'The React Framework for the Web', language: 'TypeScript', version: 'v14.2.3', size: '312 MB', lastRun: '2 hours ago', status: 'running' as const },
-  { id: 2, name: 'llama.cpp', desc: 'LLM inference in pure C/C++', language: 'C++', version: 'main @ a1b2c3d', size: '892 MB', lastRun: 'Yesterday', status: 'stopped' as const },
-  { id: 3, name: 'shadcn-ui', desc: 'Beautifully designed components', language: 'TypeScript', version: 'v0.8.0', size: '84 MB', lastRun: '3 days ago', status: 'stopped' as const },
-  { id: 4, name: 'budget-view', desc: 'Minimalistic personal finance dashboard', language: 'Rust', version: 'v1.2.1', size: '156 MB', lastRun: 'Last week', status: 'stopped' as const },
-  { id: 5, name: 'react-three-fiber', desc: 'React renderer for Three.js', language: 'TypeScript', version: 'v8.15.0', size: '248 MB', lastRun: '2 weeks ago', status: 'stopped' as const },
-  { id: 6, name: 'ollama', desc: 'Get up and running with LLMs locally', language: 'Go', version: 'v0.1.32', size: '1.4 GB', lastRun: '12 hours ago', status: 'running' as const },
+/* ------------------------- HOME: HARDCODED POPULAR PICKS -------------------------
+ * Frontend override for Home's Popular row. Bypasses whatever the backend's
+ * /api/home returns and shows a curated list instead. Recently Run is left
+ * empty on purpose — the section will be hidden when there are no cards.
+ */
+
+const HOME_POPULAR: Repository[] = [
+  { id: 8001, name: 'openclaw',  repo: 'openclaw/openclaw',             desc: 'Open-source AI agent.',                                                                     language: 'TypeScript', stars: '300k', summary: null },
+  { id: 8002, name: 'ollama',    repo: 'ollama/ollama',                 desc: 'Get up and running with large language models locally. Llama 3, Mistral, Gemma and more.', language: 'Go',         stars: '89k',  summary: null },
+  { id: 8003, name: 'vscode',    repo: 'microsoft/vscode',              desc: 'Visual Studio Code — free, built on open source, runs everywhere.',                         language: 'TypeScript', stars: '163k', summary: null },
+  { id: 8004, name: 'AutoGPT',   repo: 'Significant-Gravitas/AutoGPT',  desc: 'An experimental open-source attempt to make GPT-4 fully autonomous.',                        language: 'Python',     stars: '172k', summary: null },
 ];
+
+
+/* ------------------------- DISCOVER: REPLACE X WITH -------------------------
+ * Placeholder data for the Discover tab. Each section is a "Replace {tool}
+ * with:" group showing 3-4 open-source alternatives. Clicking a mini card
+ * opens the normal product detail page.
+ */
+
+type ReplacementSection = {
+  id: string;
+  title: string;
+  description: string;
+  repos: Repository[];
+};
+
+const REPLACEMENTS: ReplacementSection[] = [
+  {
+    id: 'notion',
+    title: 'Replace Notion with:',
+    description: 'Open-source knowledge bases and workspaces that keep your data on your own machine.',
+    repos: [
+      { id: 9001, name: 'logseq',   repo: 'logseq/logseq',           desc: 'Privacy-first, open-source knowledge base with a local-first architecture.',           language: 'Clojure',    stars: '34k',  summary: null },
+      { id: 9002, name: 'appflowy', repo: 'AppFlowy-IO/AppFlowy',    desc: 'Open-source Notion alternative built in Rust and Flutter. You own your data.',           language: 'Rust',       stars: '55k',  summary: null },
+      { id: 9003, name: 'affine',   repo: 'toeverything/AFFiNE',     desc: 'Next-gen knowledge base that brings planning, sorting and creating together.',           language: 'TypeScript', stars: '38k',  summary: null },
+      { id: 9004, name: 'anytype',  repo: 'anyproto/anytype-ts',     desc: 'Offline-first, end-to-end encrypted personal knowledge graph.',                          language: 'TypeScript', stars: '5.1k', summary: null },
+    ],
+  },
+  {
+    id: 'figma',
+    title: 'Replace Figma with:',
+    description: 'Collaborative design and diagramming tools you can self-host.',
+    repos: [
+      { id: 9101, name: 'excalidraw', repo: 'excalidraw/excalidraw', desc: 'Virtual whiteboard for sketching hand-drawn-feeling diagrams.',    language: 'TypeScript', stars: '82k', summary: null },
+      { id: 9102, name: 'penpot',     repo: 'penpot/penpot',         desc: 'The open-source design tool for design and code collaboration.',    language: 'Clojure',    stars: '34k', summary: null },
+      { id: 9103, name: 'drawio',     repo: 'jgraph/drawio',         desc: 'Production-grade diagramming that runs entirely in the browser.',   language: 'JavaScript', stars: '42k', summary: null },
+    ],
+  },
+  {
+    id: 'slack',
+    title: 'Replace Slack with:',
+    description: 'Team chat platforms that you host yourself, with no per-seat pricing.',
+    repos: [
+      { id: 9201, name: 'mattermost',  repo: 'mattermost/mattermost',        desc: 'High trust messaging for the DevSecOps lifecycle.',                language: 'Go',         stars: '30k', summary: null },
+      { id: 9202, name: 'rocket.chat', repo: 'RocketChat/Rocket.Chat',       desc: 'The communications platform that puts data protection first.',    language: 'TypeScript', stars: '40k', summary: null },
+      { id: 9203, name: 'zulip',       repo: 'zulip/zulip',                  desc: 'Threaded team chat with a distinctive topic-based model.',         language: 'Python',     stars: '22k', summary: null },
+    ],
+  },
+  {
+    id: 'dropbox',
+    title: 'Replace Dropbox with:',
+    description: 'Self-hosted file sync and cloud storage without the subscription.',
+    repos: [
+      { id: 9301, name: 'nextcloud',   repo: 'nextcloud/server',      desc: 'The most popular self-hosted cloud collaboration platform.',  language: 'PHP',        stars: '28k', summary: null },
+      { id: 9302, name: 'seafile',     repo: 'haiwen/seafile',        desc: 'High performance file syncing and sharing with file encryption.', language: 'C',       stars: '13k', summary: null },
+      { id: 9303, name: 'filebrowser', repo: 'filebrowser/filebrowser', desc: 'Web-based file manager for your server with a clean UI.',   language: 'Go',         stars: '26k', summary: null },
+    ],
+  },
+  {
+    id: 'chatgpt',
+    title: 'Replace ChatGPT with:',
+    description: 'Local-first chat frontends that run against your own models or API keys.',
+    repos: [
+      { id: 9401, name: 'open-webui', repo: 'open-webui/open-webui', desc: 'User-friendly AI interface that supports Ollama and OpenAI APIs.',   language: 'Svelte',     stars: '51k', summary: null },
+      { id: 9402, name: 'lobe-chat',  repo: 'lobehub/lobe-chat',     desc: 'Modern-design ChatGPT/LLMs UI/framework with plugin support.',       language: 'TypeScript', stars: '46k', summary: null },
+      { id: 9403, name: 'librechat',  repo: 'danny-avila/LibreChat', desc: 'Enhanced ChatGPT clone with multi-model support and self-hosting.',  language: 'TypeScript', stars: '18k', summary: null },
+      { id: 9404, name: 'chatbot-ui', repo: 'mckaywrigley/chatbot-ui', desc: 'An open-source AI chat app for everyone with a clean interface.',   language: 'TypeScript', stars: '28k', summary: null },
+    ],
+  },
+];
+
+
+/** App-level install state — hoisted out of InstallModal so polling survives
+ *  the modal being closed. Keyed by "owner/repo". */
+type ActiveInstall = {
+  install_id: string;            // empty string until kickoff resolves
+  repo: Repository;
+  detail: RepoDetail | null;
+  startedAt: number;
+  progress: InstallProgress | null;
+  pollError: string | null;
+  kickoffError: string | null;
+  saved: boolean;                // true after the success payload is persisted to localStorage
+  cancelling: boolean;           // user hit Cancel, awaiting terminal state from the runner
+};
+
+function isTerminalInstall(a: ActiveInstall): boolean {
+  return !!a.kickoffError ||
+    a.progress?.overall_status === 'success' ||
+    a.progress?.overall_status === 'failure' ||
+    a.progress?.overall_status === 'cancelled';
+}
+
+function isRunningInstall(a: ActiveInstall): boolean {
+  return !a.kickoffError && (
+    !a.progress ||
+    a.progress.overall_status === 'running' ||
+    a.progress.overall_status === 'pending'
+  );
+}
 
 export default function App() {
   const [activeView, setActiveView] = useState<'Home' | 'Discover' | 'Installed' | 'Settings'>('Home');
@@ -179,7 +291,17 @@ export default function App() {
   const [showSearchHint, setShowSearchHint] = useState(false);
   const [activeSearch, setActiveSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(0);
-  const [projectsByCategory, setProjectsByCategory] = useState<Record<string, Repository[]>>({});
+  const [searchResults, setSearchResults] = useState<Repository[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [activeInstalls, setActiveInstalls] = useState<Record<string, ActiveInstall>>({});
+  const [viewingInstallKey, setViewingInstallKey] = useState<string | null>(null);
+  const pollTimersRef = useRef<Record<string, number>>({});
+  const discoverPrefetchedRef = useRef(false);
+  const [projectsByCategory, setProjectsByCategory] = useState<Record<string, Repository[]>>({
+    Popular: HOME_POPULAR,
+    'Recently Run': [],
+  });
   const [dataLoading, setDataLoading] = useState(true);
   const [dataError, setDataError] = useState<string | null>(null);
   const [authed, setAuthed] = useState<boolean>(isAuthenticated());
@@ -195,6 +317,8 @@ export default function App() {
   }, [theme]);
 
   // Fetch curated projects from the backend (Home + Discover in parallel).
+  // Home's Popular / Recently Run are then overridden with hardcoded frontend
+  // lists so we have precise control over what the user sees on the landing tab.
   const loadProjects = async () => {
     setDataLoading(true);
     setDataError(null);
@@ -204,6 +328,9 @@ export default function App() {
       for (const block of [...home.categories, ...discover.categories]) {
         merged[block.name] = block.repos;
       }
+      // Override Home sections — backend data for Discover categories is preserved.
+      merged['Popular'] = HOME_POPULAR;
+      merged['Recently Run'] = [];
       setProjectsByCategory(merged);
     } catch (err) {
       setDataError(err instanceof Error ? err.message : 'Unknown error');
@@ -212,10 +339,274 @@ export default function App() {
     }
   };
 
+  /* ------------------------- INSTALL ORCHESTRATION -------------------------
+   * Install state lives at the app level so that closing the modal doesn't
+   * cancel the polling loop. Multiple repos can install in parallel. The
+   * Installed tab shows in-progress installs in a dedicated section, and the
+   * sidebar's "Installed" nav item pulses a small white dot while any install
+   * is still running.
+   */
+
+  const pollInstall = (key: string, installId: string) => {
+    const tick = async () => {
+      try {
+        const p = await fetchInstallProgress(installId);
+        let shouldSave = false;
+        setActiveInstalls(prev => {
+          const entry = prev[key];
+          if (!entry) return prev;
+          if (p.overall_status === 'success' && p.result && !entry.saved) {
+            shouldSave = true;
+          }
+          return {
+            ...prev,
+            [key]: {
+              ...entry,
+              progress: p,
+              pollError: null,
+              saved: entry.saved || p.overall_status === 'success',
+            },
+          };
+        });
+
+        if (shouldSave && p.result) {
+          const entry = activeInstalls[key];
+          const currentEntry = entry ?? {
+            repo: { repo: p.owner + '/' + p.repo, name: p.repo, desc: '', language: '', stars: '0', id: 0, summary: null } as Repository,
+            detail: null as RepoDetail | null,
+          };
+          if (currentEntry.repo.repo) {
+            const installEntry = snapshotFromDetail(
+              {
+                name: currentEntry.repo.name,
+                desc: currentEntry.repo.desc,
+                language: currentEntry.repo.language,
+                stars: currentEntry.repo.stars,
+                repo: currentEntry.repo.repo,
+              },
+              currentEntry.detail,
+              p.install_id,
+            );
+            installEntry.result = {
+              summary: p.result.summary,
+              run_command: p.result.run_command,
+              entry_point: p.result.entry_point,
+              app_type: p.result.app_type,
+              env_vars_used: p.result.env_vars_used ?? [],
+            };
+            addInstall(installEntry);
+          }
+        }
+
+        if (p.overall_status === 'success' || p.overall_status === 'failure' || p.overall_status === 'cancelled') {
+          delete pollTimersRef.current[key];
+          return;
+        }
+
+        pollTimersRef.current[key] = window.setTimeout(tick, 1000);
+      } catch (err) {
+        setActiveInstalls(prev => {
+          const entry = prev[key];
+          if (!entry) return prev;
+          return {
+            ...prev,
+            [key]: { ...entry, pollError: err instanceof Error ? err.message : 'Polling failed' },
+          };
+        });
+        pollTimersRef.current[key] = window.setTimeout(tick, 2500);
+      }
+    };
+    tick();
+  };
+
+  const startInstall = async (project: Repository, detail: RepoDetail | null) => {
+    if (!project.repo) return;
+    const key = project.repo;
+
+    const existing = activeInstalls[key];
+    if (existing && !isTerminalInstall(existing)) {
+      setViewingInstallKey(key);
+      return;
+    }
+
+    setActiveInstalls(prev => ({
+      ...prev,
+      [key]: {
+        install_id: '',
+        repo: project,
+        detail,
+        startedAt: Date.now(),
+        progress: null,
+        pollError: null,
+        kickoffError: null,
+        saved: false,
+        cancelling: false,
+      },
+    }));
+    setViewingInstallKey(key);
+
+    if (pollTimersRef.current[key]) {
+      window.clearTimeout(pollTimersRef.current[key]);
+      delete pollTimersRef.current[key];
+    }
+
+    try {
+      const { install_id } = await kickInstall(project.repo);
+      setActiveInstalls(prev => {
+        const entry = prev[key];
+        if (!entry) return prev;
+        return { ...prev, [key]: { ...entry, install_id } };
+      });
+      pollInstall(key, install_id);
+    } catch (err) {
+      setActiveInstalls(prev => {
+        const entry = prev[key];
+        if (!entry) return prev;
+        return {
+          ...prev,
+          [key]: { ...entry, kickoffError: err instanceof Error ? err.message : 'Failed to start install' },
+        };
+      });
+    }
+  };
+
+  const retryInstall = (key: string) => {
+    const entry = activeInstalls[key];
+    if (!entry) return;
+    if (pollTimersRef.current[key]) {
+      window.clearTimeout(pollTimersRef.current[key]);
+      delete pollTimersRef.current[key];
+    }
+    setActiveInstalls(prev => {
+      const { [key]: _removed, ...rest } = prev;
+      return rest;
+    });
+    setTimeout(() => startInstall(entry.repo, entry.detail), 0);
+  };
+
+  const dismissInstall = (key: string) => {
+    const entry = activeInstalls[key];
+    if (pollTimersRef.current[key]) {
+      window.clearTimeout(pollTimersRef.current[key]);
+      delete pollTimersRef.current[key];
+    }
+    // If this was a non-success dismissal (failure / cancelled), wipe the
+    // backend workdir so we don't accumulate orphaned scratch directories.
+    // Success workdirs stay on disk — the user may want to run the artifact.
+    if (entry?.install_id && entry.progress && entry.progress.overall_status !== 'success') {
+      void deleteInstall(entry.install_id).catch(() => { /* best-effort cleanup */ });
+    }
+    setActiveInstalls(prev => {
+      const { [key]: _removed, ...rest } = prev;
+      return rest;
+    });
+    setViewingInstallKey(cur => (cur === key ? null : cur));
+  };
+
+  // User clicked Cancel — tell the backend to abort, keep polling so we see
+  // the terminal state transition (the runner may take up to one bash-command
+  // duration to observe the cancel flag).
+  const cancelActiveInstall = async (key: string) => {
+    const entry = activeInstalls[key];
+    if (!entry || !entry.install_id) return;
+    setActiveInstalls(prev => {
+      const cur = prev[key];
+      if (!cur) return prev;
+      return { ...prev, [key]: { ...cur, cancelling: true } };
+    });
+    try {
+      await cancelInstall(entry.install_id);
+    } catch (err) {
+      setActiveInstalls(prev => {
+        const cur = prev[key];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [key]: {
+            ...cur,
+            cancelling: false,
+            pollError: err instanceof Error ? err.message : 'Cancel request failed',
+          },
+        };
+      });
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      Object.values(pollTimersRef.current).forEach(id => window.clearTimeout(id));
+      pollTimersRef.current = {};
+    };
+  }, []);
+
+  const anyInstallRunning = Object.values(activeInstalls).some(isRunningInstall);
+
   // Only fetch project data once the user is authenticated — avoids pointless 401s.
   useEffect(() => {
     if (authed) loadProjects();
   }, [authed]);
+
+  // On sign-in (cold launch or after sign-out → sign-in), walk the existing
+  // detail cache and warm the browser's HTTP image cache for every repo we
+  // already have metadata for. This means Home / Discover / Search clicks
+  // render with zero network activity for both text AND images on subsequent
+  // sessions, not just the first one where the prefetch ran.
+  useEffect(() => {
+    if (!authed) return;
+    try {
+      const raw = window.localStorage.getItem('shirim-detail-cache');
+      if (!raw) return;
+      const map = JSON.parse(raw) as Record<string, { images?: string[] }>;
+      for (const entry of Object.values(map)) {
+        if (entry?.images) preloadImages(entry.images);
+      }
+    } catch {
+      // best-effort — ignore parse errors
+    }
+  }, [authed]);
+
+  // Background prefetch: the first time the user visits Discover (per session),
+  // fire fetchRepoDetail for every repo in REPLACEMENTS and store the responses
+  // in the localStorage detail cache. Subsequent clicks open instantly with no
+  // loading state. Concurrency-limited to 3 in-flight to avoid hammering the
+  // backend.
+  useEffect(() => {
+    if (!authed) return;
+    if (activeView !== 'Discover') return;
+    if (discoverPrefetchedRef.current) return;
+    discoverPrefetchedRef.current = true;
+
+    const toFetch = REPLACEMENTS
+      .flatMap(section => section.repos)
+      .filter((repo): repo is Repository & { repo: string } =>
+        !!repo.repo && !hasCachedDetail(repo.repo)
+      );
+    if (toFetch.length === 0) return;
+
+    let cancelled = false;
+    let index = 0;
+    const worker = async () => {
+      while (!cancelled && index < toFetch.length) {
+        const i = index++;
+        const repo = toFetch[i];
+        try {
+          const d = await fetchRepoDetail(repo.repo);
+          if (cancelled) return;
+          setCachedDetail(repo.repo, d);
+          // Warm the browser's HTTP cache with the carousel images so clicks
+          // render instantly with zero image-download latency.
+          preloadImages(d.images);
+        } catch {
+          // best-effort — silently skip failures, user can still trigger a
+          // live fetch by clicking
+        }
+      }
+    };
+    // Start 3 concurrent workers
+    void Promise.all([worker(), worker(), worker()]);
+
+    return () => { cancelled = true; };
+  }, [authed, activeView]);
 
   // On launch, if the user appears to be signed in, validate the session against
   // /api/v1/auth/me. This refreshes the cached user and catches stale tokens early
@@ -248,39 +639,42 @@ export default function App() {
     return () => clearTimeout(t);
   }, [searchQuery, activeSearch]);
 
-  // Commit the current query → triggers filtering + pagination. Resets to page 0.
-  const commitSearch = () => {
+  // Commit the current query → hits /api/search, stores results, paginates client-side.
+  const commitSearch = async () => {
     const q = searchQuery.trim();
     if (q.length === 0) {
       setActiveSearch('');
+      setSearchResults([]);
+      setSearchError(null);
       return;
     }
     setActiveSearch(q);
     setCurrentPage(0);
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      const r = await searchRepos(q, 50);
+      setSearchResults(r.repos);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Search failed');
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
   };
 
   const clearSearch = () => {
     setSearchQuery('');
     setActiveSearch('');
     setCurrentPage(0);
+    setSearchResults([]);
+    setSearchError(null);
   };
 
-  // Derived: filter all projects across all categories by the committed query.
+  // Client-side pagination over the fetched search results.
   const PAGE_SIZE = 10;
-  const allProjects: Repository[] = Object.values(projectsByCategory).flat();
-  const filteredProjects = activeSearch
-    ? allProjects.filter(p => {
-        const q = activeSearch.toLowerCase();
-        return (
-          p.name.toLowerCase().includes(q) ||
-          p.desc.toLowerCase().includes(q) ||
-          p.language.toLowerCase().includes(q) ||
-          (p.repo ? p.repo.toLowerCase().includes(q) : false)
-        );
-      })
-    : [];
-  const totalPages = Math.max(1, Math.ceil(filteredProjects.length / PAGE_SIZE));
-  const pageResults = filteredProjects.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(searchResults.length / PAGE_SIZE));
+  const pageResults = searchResults.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', backgroundColor: 'var(--bg)', color: 'var(--text-primary)', overflow: 'hidden' }}>
@@ -320,7 +714,13 @@ export default function App() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
           <NavItem icon={<Home size={18} />} label="Home" active={activeView === 'Home'} onClick={() => setActiveView('Home')} />
           <NavItem icon={<Compass size={18} />} label="Discover" active={activeView === 'Discover'} onClick={() => setActiveView('Discover')} />
-          <NavItem icon={<Download size={18} />} label="Installed" active={activeView === 'Installed'} onClick={() => setActiveView('Installed')} />
+          <NavItem
+            icon={<Download size={18} />}
+            label="Installed"
+            active={activeView === 'Installed'}
+            onClick={() => setActiveView('Installed')}
+            busy={anyInstallRunning}
+          />
         </div>
 
         {/* Bottom Nav */}
@@ -337,6 +737,7 @@ export default function App() {
             <ProductPage
               project={selectedProject}
               onBack={() => setSelectedProject(null)}
+              onInstall={(repo, detail) => startInstall(repo, detail)}
             />
           </div>
         ) : (
@@ -360,7 +761,19 @@ export default function App() {
               <input
                 placeholder="search for apps, tools, repos..."
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setSearchQuery(next);
+                  // When the user starts typing a new query, auto-clear the
+                  // previous results so the old results view disappears
+                  // without needing an explicit Clear button.
+                  if (activeSearch && next !== activeSearch) {
+                    setActiveSearch('');
+                    setSearchResults([]);
+                    setSearchError(null);
+                    setCurrentPage(0);
+                  }
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') commitSearch();
                   if (e.key === 'Escape') clearSearch();
@@ -411,63 +824,156 @@ export default function App() {
             </div>
           </div>
 
+          {/* Results subtitle — shown below the search bar whenever a search is active. */}
+          {activeSearch && !searchLoading && !searchError && (
+            <div style={{
+              marginTop: '12px',
+              marginLeft: '22px',
+              fontSize: '12px',
+              color: 'var(--text-muted)'
+            }}>
+              Found <span style={{ color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>{searchResults.length}</span> {searchResults.length === 1 ? 'result' : 'results'}
+            </div>
+          )}
+
         </div>
         )}
 
         {/* View Router */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {activeView === 'Installed' && <InstalledPage />}
+          {activeView === 'Installed' && (
+            <InstalledPage
+              activeInstalls={activeInstalls}
+              onOpenInstall={(key) => setViewingInstallKey(key)}
+            />
+          )}
           {activeView === 'Settings' && <SettingsPage theme={theme} setTheme={setTheme} />}
           {(activeView === 'Home' || activeView === 'Discover') && dataError && (
             <BackendErrorState message={dataError} onRetry={loadProjects} />
           )}
           {(activeView === 'Home' || activeView === 'Discover') && !dataError && activeSearch && (
             <SearchResults
-              query={activeSearch}
               results={pageResults}
-              totalCount={filteredProjects.length}
+              loading={searchLoading}
+              error={searchError}
               currentPage={currentPage}
               totalPages={totalPages}
               onPageChange={setCurrentPage}
               onSelect={(p) => setSelectedProject(p)}
-              onClear={clearSearch}
             />
           )}
-          {(activeView === 'Home' || activeView === 'Discover') && !dataError && !activeSearch && (
-            <div style={{ padding: '24px 0 40px' }}>
-          {VIEW_CATEGORIES[activeView].map(cat => (
-            <div key={cat} style={{ marginBottom: '40px' }}>
-              <div style={{
-                padding: '0 40px',
-                marginBottom: '16px',
-                color: 'var(--text-muted)',
-                fontSize: '12px',
-                textTransform: 'uppercase',
-                letterSpacing: '0.1em'
-              }}>
-                {cat}
-              </div>
+          {activeView === 'Home' && !dataError && !activeSearch && (
+            <div style={{ padding: '24px 40px 48px' }}>
+              {VIEW_CATEGORIES.Home
+                .filter(cat => (projectsByCategory[cat] ?? []).length > 0)
+                .map(cat => (
+                  <div
+                    key={cat}
+                    className="fade-in"
+                    style={{
+                      backgroundColor: 'var(--surface)',
+                      border: '1px solid var(--border)',
+                      borderRadius: '12px',
+                      padding: '28px',
+                      marginBottom: '14px'
+                    }}>
+                    {/* Section title — same weight as ReplacementCard on Discover */}
+                    <h2 style={{
+                      fontSize: '22px',
+                      fontWeight: 500,
+                      color: 'var(--text-primary)',
+                      letterSpacing: '-0.01em',
+                      marginBottom: '22px'
+                    }}>
+                      {cat}
+                    </h2>
 
-              <div className="hide-scrollbar" style={{
-                overflowX: 'auto',
-                overflowY: 'hidden',
-                containerType: 'inline-size'
-              } as CSSProperties}>
-                <div style={{
-                  display: 'grid',
-                  gridTemplateRows: 'repeat(2, 220px)',
-                  gridAutoFlow: 'column',
-                  gridAutoColumns: 'calc((100cqw - 96px) / 2)',
-                  gap: '16px',
-                  padding: '0 40px'
-                }}>
-                  {(projectsByCategory[cat] ?? []).map(proj => (
-                    <ProjectCard key={proj.id} project={proj} onClick={() => setSelectedProject(proj)} />
-                  ))}
+                    {/* Horizontally scrollable 2-row grid.
+                        With 4 repos and 2 rows, you get a clean 2×2 layout with
+                        no scroll. Add more repos → the grid grows columns and
+                        horizontal scroll kicks in. Vertical padding gives cards
+                        room to lift on hover without being clipped. */}
+                    <div
+                      className="hide-scrollbar"
+                      style={{
+                        overflowX: 'auto',
+                        overflowY: 'hidden',
+                        containerType: 'inline-size',
+                        paddingTop: '10px',
+                        paddingBottom: '10px'
+                      } as CSSProperties}>
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateRows: 'repeat(2, 220px)',
+                        gridAutoFlow: 'column',
+                        gridAutoColumns: 'calc((100cqw - 16px) / 2)',
+                        gap: '16px'
+                      }}>
+                        {(projectsByCategory[cat] ?? []).map(proj => (
+                          <ProjectCard
+                            key={proj.id}
+                            project={proj}
+                            onClick={() => setSelectedProject(proj)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+              {/* Discover more — right-aligned call-to-action below the Popular card.
+                  Clickable → jumps to the Discover tab. */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '10px' }}>
+                <div
+                  onClick={() => setActiveView('Discover')}
+                  onMouseEnter={(e) => {
+                    const el = e.currentTarget.firstChild as HTMLElement;
+                    el.style.color = 'var(--accent)';
+                    el.style.textDecorationColor = 'var(--accent)';
+                  }}
+                  onMouseLeave={(e) => {
+                    const el = e.currentTarget.firstChild as HTMLElement;
+                    el.style.color = 'var(--text-primary)';
+                    el.style.textDecorationColor = 'transparent';
+                  }}
+                  style={{
+                    cursor: 'pointer',
+                    textAlign: 'left'
+                  }}>
+                  <div style={{
+                    fontSize: '15px',
+                    fontWeight: 500,
+                    color: 'var(--text-primary)',
+                    letterSpacing: '-0.01em',
+                    marginBottom: '4px',
+                    textDecoration: 'underline',
+                    textDecorationColor: 'transparent',
+                    textDecorationThickness: '1.5px',
+                    textUnderlineOffset: '4px',
+                    transition: 'color 240ms ease-out, text-decoration-color 240ms ease-out'
+                  }}>
+                    Discover more →
+                  </div>
+                  <div style={{
+                    fontSize: '12px',
+                    color: 'var(--text-muted)'
+                  }}>
+                    Find open source alternatives to paid apps.
+                  </div>
                 </div>
               </div>
             </div>
-          ))}
+          )}
+
+          {activeView === 'Discover' && !dataError && !activeSearch && (
+            <div style={{ padding: '24px 40px 48px' }}>
+              {REPLACEMENTS.map(section => (
+                <ReplacementCard
+                  key={section.id}
+                  section={section}
+                  onSelect={(repo) => setSelectedProject(repo)}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -477,6 +983,18 @@ export default function App() {
       </div>
 
       </div>
+      )}
+
+      {/* App-level install modal — rendered here so it survives view changes
+          and so closing it doesn't cancel the underlying polling loop. */}
+      {viewingInstallKey && activeInstalls[viewingInstallKey] && (
+        <InstallModal
+          install={activeInstalls[viewingInstallKey]}
+          onClose={() => setViewingInstallKey(null)}
+          onRetry={() => retryInstall(viewingInstallKey)}
+          onDismiss={() => dismissInstall(viewingInstallKey)}
+          onCancel={() => cancelActiveInstall(viewingInstallKey)}
+        />
       )}
     </div>
   );
@@ -1051,7 +1569,19 @@ function AuthScreen({ onAuthSuccess }: { onAuthSuccess: () => void }) {
 }
 
 
-function NavItem({ icon, label, active, onClick }) {
+function NavItem({
+  icon,
+  label,
+  active,
+  onClick,
+  busy = false,
+}: {
+  icon: ReactNode;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  busy?: boolean;
+}) {
   return (
     <div
       onClick={onClick}
@@ -1062,7 +1592,8 @@ function NavItem({ icon, label, active, onClick }) {
         color: active ? 'var(--accent)' : 'var(--text-secondary)',
         backgroundColor: active ? 'var(--accent-glow)' : 'transparent',
         cursor: 'pointer',
-        transition: 'all 120ms ease-out'
+        transition: 'all 120ms ease-out',
+        position: 'relative'
       }}
       onMouseEnter={(e) => {
         if(!active) {
@@ -1075,7 +1606,25 @@ function NavItem({ icon, label, active, onClick }) {
         }
       }}>
       {icon}
-      <span style={{ fontSize: '15px' }}>{label}</span>
+      <span style={{ fontSize: '15px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {label}
+        {busy && (
+          <span
+            className="pulse-dot"
+            title="Install in progress"
+            style={{
+              display: 'inline-block',
+              width: '6px',
+              height: '6px',
+              borderRadius: '50%',
+              backgroundColor: '#ffffff',
+              boxShadow: '0 0 6px rgba(255,255,255,0.55)',
+              flexShrink: 0,
+              transform: 'translateY(-5px)'
+            }}
+          />
+        )}
+      </span>
     </div>
   );
 }
@@ -1185,6 +1734,81 @@ function ProjectCard({ project, onClick }) {
 }
 
 
+/* ------------------------- REPLACEMENT CARD (DISCOVER) ------------------------- */
+
+function ReplacementCard({
+  section,
+  onSelect,
+}: {
+  section: ReplacementSection;
+  onSelect: (repo: Repository) => void;
+}) {
+  return (
+    <div
+      className="fade-in"
+      style={{
+        backgroundColor: 'var(--surface)',
+        border: '1px solid var(--border)',
+        borderRadius: '12px',
+        padding: '28px',
+        marginBottom: '24px'
+      }}>
+      {/* Title */}
+      <h2 style={{
+        fontSize: '22px',
+        fontWeight: 500,
+        color: 'var(--text-primary)',
+        letterSpacing: '-0.01em',
+        marginBottom: '6px'
+      }}>
+        {section.title}
+      </h2>
+
+      {/* Description */}
+      <p style={{
+        fontSize: '13px',
+        color: 'var(--text-muted)',
+        lineHeight: 1.6,
+        marginBottom: '22px',
+        maxWidth: '640px'
+      }}>
+        {section.description}
+      </p>
+
+      {/* Horizontally scrollable single-row strip.
+          Shows 2 full cards + a 15% peek of the 3rd so users get an instant
+          visual cue that the strip is scrollable. Vertical padding gives
+          cards room to lift on hover without being clipped. */}
+      <div
+        className="hide-scrollbar"
+        style={{
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          containerType: 'inline-size',
+          paddingTop: '10px',
+          paddingBottom: '10px'
+        } as CSSProperties}>
+        <div style={{
+          display: 'grid',
+          gridTemplateRows: '220px',
+          gridAutoFlow: 'column',
+          gridAutoColumns: 'calc((100cqw - 32px) / 2.15)',
+          gap: '16px'
+        }}>
+          {section.repos.map(repo => (
+            <ProjectCard
+              key={repo.id}
+              project={repo}
+              onClick={() => onSelect(repo)}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function FallbackBanner({ name }: { name: string }) {
   // Themed fallback shown when no README image was found.
   // Diagonal stripe pattern + a centered "label tag" with the project name.
@@ -1230,67 +1854,59 @@ function FallbackBanner({ name }: { name: string }) {
 /* ------------------------- SEARCH RESULTS PAGE ------------------------- */
 
 function SearchResults({
-  query,
   results,
-  totalCount,
+  loading,
+  error,
   currentPage,
   totalPages,
   onPageChange,
   onSelect,
-  onClear,
 }: {
-  query: string;
   results: Repository[];
-  totalCount: number;
+  loading: boolean;
+  error: string | null;
   currentPage: number;
   totalPages: number;
   onPageChange: (p: number) => void;
   onSelect: (p: Repository) => void;
-  onClear: () => void;
 }) {
   return (
-    <div style={{ padding: '24px 40px 40px' }}>
-      {/* Results header */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'flex-end',
-        marginBottom: '24px',
-        paddingBottom: '14px',
-        borderBottom: '1px solid var(--border)'
-      }}>
-        <div>
-          <div style={{
-            fontSize: '11px', color: 'var(--text-muted)',
-            textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '6px'
-          }}>
-            Search results
-          </div>
-          <div style={{ fontSize: '18px', color: 'var(--text-primary)' }}>
-            <span style={{ color: 'var(--text-secondary)' }}>{totalCount} match{totalCount === 1 ? '' : 'es'} for</span>{' '}
-            <span style={{ color: 'var(--accent)' }}>"{query}"</span>
+    <div style={{ padding: '18px 40px 40px' }}>
+      {/* Loading state */}
+      {loading && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          gap: '12px', padding: '60px 20px',
+          color: 'var(--text-muted)', fontSize: '13px'
+        }}>
+          <span className="spinner" style={{ display: 'inline-flex' }}>
+            <RefreshCw size={16} />
+          </span>
+          Searching…
+        </div>
+      )}
+
+      {/* Error state */}
+      {!loading && error && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '14px',
+          padding: '20px',
+          borderRadius: '8px',
+          border: '1px solid var(--border)',
+          backgroundColor: 'var(--surface-2)'
+        }}>
+          <AlertTriangle size={18} color="var(--error)" style={{ flexShrink: 0 }} />
+          <div style={{ fontSize: '13px', color: 'var(--text-primary)', flex: 1 }}>
+            Search failed
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px', fontFamily: 'var(--font-pixel)' }}>
+              {error}
+            </div>
           </div>
         </div>
-        <button
-          onClick={onClear}
-          style={{
-            display: 'flex', alignItems: 'center', gap: '6px',
-            background: 'transparent',
-            border: '1px solid var(--border)',
-            color: 'var(--text-secondary)',
-            padding: '8px 14px',
-            borderRadius: '6px',
-            fontFamily: 'var(--font-pixel)',
-            fontSize: '12px',
-            cursor: 'pointer'
-          }}>
-          <X size={12} />
-          Clear
-        </button>
-      </div>
+      )}
 
-      {/* Results grid */}
-      {results.length === 0 ? (
+      {/* Empty state */}
+      {!loading && !error && results.length === 0 && (
         <div style={{
           padding: '80px 20px',
           textAlign: 'center',
@@ -1302,12 +1918,15 @@ function SearchResults({
           </div>
           <div>Try a different keyword or clear the search to browse categories.</div>
         </div>
-      ) : (
+      )}
+
+      {/* Results list — vertically stacked full-width cards */}
+      {!loading && !error && results.length > 0 && (
         <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-          gap: '16px',
-          marginBottom: '32px'
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '14px',
+          marginBottom: '24px'
         }}>
           {results.map(proj => (
             <div key={proj.id} style={{ height: '220px' }}>
@@ -1318,7 +1937,7 @@ function SearchResults({
       )}
 
       {/* Pagination */}
-      {totalPages > 1 && (
+      {!loading && !error && results.length > 0 && totalPages > 1 && (
         <div style={{
           display: 'flex',
           justifyContent: 'center',
@@ -1438,9 +2057,20 @@ function BackendErrorState({ message, onRetry }: { message: string; onRetry: () 
 
 /* ------------------------- PRODUCT (DETAIL) PAGE ------------------------- */
 
-function ProductPage({ project, onBack }: { project: Repository; onBack: () => void }) {
-  const [detail, setDetail] = useState<RepoDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState<boolean>(!!project.repo);
+function ProductPage({
+  project,
+  onBack,
+  onInstall,
+}: {
+  project: Repository;
+  onBack: () => void;
+  onInstall: (repo: Repository, detail: RepoDetail | null) => void;
+}) {
+  // Seed from cache synchronously if we have it — this makes cache-hit navigations
+  // instant (no loading state flash) even before the useEffect fires.
+  const cachedSeed = project.repo ? getCachedDetail(project.repo) : null;
+  const [detail, setDetail] = useState<RepoDetail | null>(cachedSeed);
+  const [detailLoading, setDetailLoading] = useState<boolean>(!!project.repo && !cachedSeed);
   const [detailError, setDetailError] = useState<string | null>(null);
 
   const loadDetail = async () => {
@@ -1448,11 +2078,22 @@ function ProductPage({ project, onBack }: { project: Repository; onBack: () => v
       setDetailLoading(false);
       return;
     }
+    // Cache hit: render immediately, no network call, no loading state.
+    const cached = getCachedDetail(project.repo);
+    if (cached) {
+      setDetail(cached);
+      setDetailLoading(false);
+      setDetailError(null);
+      preloadImages(cached.images);
+      return;
+    }
     setDetailLoading(true);
     setDetailError(null);
     try {
       const d = await fetchRepoDetail(project.repo);
       setDetail(d);
+      setCachedDetail(project.repo, d);
+      preloadImages(d.images);
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
@@ -1537,6 +2178,8 @@ function ProductPage({ project, onBack }: { project: Repository; onBack: () => v
       {/* Action buttons — Install (accent) + View on GitHub (ghost) + difficulty badge */}
       <div style={{ display: 'flex', gap: '12px', marginTop: '28px', alignItems: 'center', flexWrap: 'wrap' }}>
         <button
+          onClick={() => onInstall(project, detail)}
+          disabled={!project.repo}
           style={{
             display: 'flex', alignItems: 'center', gap: '8px',
             padding: '12px 24px',
@@ -1547,7 +2190,8 @@ function ProductPage({ project, onBack }: { project: Repository; onBack: () => v
             fontFamily: 'var(--font-pixel)',
             fontSize: '14px',
             fontWeight: 'bold',
-            cursor: 'pointer',
+            cursor: project.repo ? 'pointer' : 'not-allowed',
+            opacity: project.repo ? 1 : 0.45,
             boxShadow: '0 0 0 1px var(--accent), 0 6px 20px var(--accent-glow)'
           }}>
           <Download size={14} />
@@ -1764,7 +2408,471 @@ function DetailRow({ label, value }: { label: string; value: string }) {
       fontSize: '13px'
     }}>
       <div style={{ color: 'var(--text-muted)' }}>{label}</div>
-      <div style={{ color: 'var(--text-primary)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+      <div style={{ color: 'var(--text-primary)', textAlign: 'right', fontVariantNumeric: 'tabular-nums', wordBreak: 'break-word', maxWidth: '60%' }}>{value}</div>
+    </div>
+  );
+}
+
+
+/* ------------------------- INSTALL MODAL ------------------------- */
+
+const FALLBACK_STEPS: InstallStep[] = [
+  { id: 'prepare',  label: 'Preparing',  status: 'active' },
+  { id: 'analyze',  label: 'Analyzing',  status: 'pending' },
+  { id: 'install',  label: 'Installing', status: 'pending' },
+  { id: 'test',     label: 'Testing',    status: 'pending' },
+  { id: 'finalize', label: 'Finalizing', status: 'pending' },
+];
+
+function InstallStepIcon({ status }: { status: StepStatus }) {
+  switch (status) {
+    case 'done':
+      return <Check size={14} color="var(--accent)" />;
+    case 'active':
+      return (
+        <span className="spinner" style={{ display: 'inline-flex' }}>
+          <RefreshCw size={14} color="var(--accent)" />
+        </span>
+      );
+    case 'failed':
+      return <X size={14} color="var(--error)" />;
+    case 'pending':
+    default:
+      return (
+        <div style={{
+          width: '8px',
+          height: '8px',
+          borderRadius: '50%',
+          backgroundColor: 'var(--text-muted)',
+          margin: '3px'
+        }} />
+      );
+  }
+}
+
+function InstallModal({
+  install,
+  onClose,
+  onRetry,
+  onDismiss,
+  onCancel,
+}: {
+  install: ActiveInstall;
+  onClose: () => void;         // hide modal, keep install running in the background
+  onRetry: () => void;         // start over with a fresh install_id
+  onDismiss: () => void;       // remove from activeInstalls entirely (terminal states only)
+  onCancel: () => void;        // POST /api/v1/install/{id}/cancel, stay on modal
+}) {
+  const { repo: project, progress, kickoffError, pollError, startedAt, cancelling } = install;
+  const isTerminal = progress?.overall_status === 'success' || progress?.overall_status === 'failure' || !!kickoffError;
+
+  // ESC to close — always allowed, even while running. Install keeps going in the background.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const stepsToRender: InstallStep[] = progress?.steps ?? FALLBACK_STEPS;
+  const elapsedMs = progress?.duration_ms ?? (Date.now() - startedAt);
+  const elapsedLabel = `${Math.max(0, Math.floor(elapsedMs / 1000))}s`;
+
+  let title = `Installing ${project.repo ?? project.name}`;
+  if (progress?.overall_status === 'success') title = 'Installed';
+  else if (progress?.overall_status === 'cancelled') title = 'Install cancelled';
+  else if (progress?.overall_status === 'failure') title = 'Install failed';
+  else if (kickoffError) title = 'Install failed';
+
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: 'fixed',
+        top: '32px',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.6)',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '32px',
+        zIndex: 100
+      }}>
+      <div className="fade-in" style={{
+        width: '100%',
+        maxWidth: '520px',
+        maxHeight: 'calc(100vh - 128px)',
+        overflowY: 'auto',
+        backgroundColor: 'var(--surface)',
+        border: '1px solid var(--border)',
+        borderRadius: '12px',
+        padding: '28px',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.4)'
+      }}>
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px', gap: '16px' }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <h2 style={{
+              fontSize: '18px',
+              fontWeight: 500,
+              color: 'var(--text-primary)',
+              letterSpacing: '-0.01em',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap'
+            }}>
+              {title}
+            </h2>
+            {project.repo && (
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                {project.repo}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            title="Close (install keeps running in the background)"
+            style={{
+              width: '28px',
+              height: '28px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: '6px',
+              border: '1px solid var(--border)',
+              backgroundColor: 'transparent',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              flexShrink: 0,
+              padding: 0
+            }}>
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Status sub-line */}
+        <div style={{
+          fontSize: '11px',
+          color: 'var(--text-muted)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.1em',
+          marginBottom: '20px',
+          marginTop: '10px'
+        }}>
+          {cancelling
+            ? 'Cancelling…'
+            : kickoffError
+              ? 'Kickoff failed'
+              : progress
+                ? progress.overall_status
+                : 'starting…'}
+          {' · '}
+          <span style={{ color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>{elapsedLabel} elapsed</span>
+          {pollError && !isTerminal && (
+            <>
+              {' · '}
+              <span style={{ color: 'var(--error)' }}>reconnecting…</span>
+            </>
+          )}
+        </div>
+
+        {/* Hint: closing doesn't cancel */}
+        {!isTerminal && !kickoffError && !cancelling && (
+          <div style={{
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            backgroundColor: 'var(--surface-2)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            marginBottom: '18px',
+            lineHeight: 1.5
+          }}>
+            You can close this window — the install will keep running in the background.
+            Reopen it from the <span style={{ color: 'var(--text-secondary)' }}>Installed</span> tab.
+          </div>
+        )}
+
+        {/* Cancelling notice */}
+        {cancelling && !isTerminal && (
+          <div style={{
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            backgroundColor: 'var(--surface-2)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            marginBottom: '18px',
+            lineHeight: 1.5
+          }}>
+            Cancel request sent. Waiting for the runner to shut down — this may take a few seconds while the current step completes.
+          </div>
+        )}
+
+        {/* Step list */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
+          {stepsToRender.map(step => {
+            const color =
+              step.status === 'done'   ? 'var(--text-primary)' :
+              step.status === 'active' ? 'var(--accent)' :
+              step.status === 'failed' ? 'var(--error)' :
+              'var(--text-muted)';
+            return (
+              <div key={step.id} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{ width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <InstallStepIcon status={step.status} />
+                </div>
+                <div style={{ fontSize: '14px', color, fontFamily: 'var(--font-pixel)' }}>
+                  {step.label}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Cancel button — visible while the install is running and not already cancelling. */}
+        {!isTerminal && !kickoffError && (
+          <div style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: '10px',
+            marginTop: '18px',
+            paddingTop: '18px',
+            borderTop: '1px solid var(--border)'
+          }}>
+            <button
+              onClick={onCancel}
+              disabled={cancelling || !install.install_id}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '10px 18px',
+                borderRadius: '6px',
+                border: '1px solid var(--border)',
+                backgroundColor: 'transparent',
+                color: cancelling ? 'var(--text-muted)' : 'var(--error)',
+                fontFamily: 'var(--font-pixel)',
+                fontSize: '13px',
+                cursor: cancelling || !install.install_id ? 'not-allowed' : 'pointer',
+                opacity: cancelling || !install.install_id ? 0.55 : 1,
+                transition: 'all 120ms ease-out'
+              }}>
+              {cancelling ? (
+                <>
+                  <span className="spinner" style={{ display: 'inline-flex' }}>
+                    <RefreshCw size={12} />
+                  </span>
+                  Cancelling…
+                </>
+              ) : (
+                <>
+                  <X size={12} />
+                  Cancel install
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* Kickoff error panel */}
+        {kickoffError && (
+          <div style={{
+            marginTop: '20px',
+            paddingTop: '20px',
+            borderTop: '1px solid var(--border)'
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              marginBottom: '14px'
+            }}>
+              <AlertTriangle size={18} color="var(--error)" style={{ flexShrink: 0 }} />
+              <div style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
+                Couldn't start the install
+              </div>
+            </div>
+            <div style={{
+              fontSize: '11px',
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--font-pixel)',
+              padding: '12px',
+              backgroundColor: 'var(--surface-2)',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              marginBottom: '14px',
+              wordBreak: 'break-word'
+            }}>
+              {kickoffError}
+            </div>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <GhostButton onClick={onDismiss}>Close</GhostButton>
+              <button onClick={onRetry} style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '10px 20px',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+                color: 'var(--on-accent)',
+                fontFamily: 'var(--font-pixel)',
+                fontSize: '13px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}>
+                <RefreshCw size={12} /> Retry
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Success result panel */}
+        {progress?.overall_status === 'success' && progress.result && (
+          <div style={{ marginTop: '20px', paddingTop: '20px', borderTop: '1px solid var(--border)' }}>
+            <div style={{
+              fontSize: '11px',
+              color: 'var(--text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+              marginBottom: '10px'
+            }}>
+              Result
+            </div>
+            {progress.result.summary && (
+              <p style={{
+                fontSize: '13px',
+                color: 'var(--text-secondary)',
+                lineHeight: 1.6,
+                marginBottom: '12px'
+              }}>
+                {progress.result.summary}
+              </p>
+            )}
+            <DetailRow label="App type"    value={progress.result.app_type} />
+            <DetailRow label="Run command" value={progress.result.run_command} />
+            <DetailRow label="Entry point" value={progress.result.entry_point} />
+            {progress.result.env_vars_used && progress.result.env_vars_used.length > 0 && (
+              <DetailRow label="Env vars" value={progress.result.env_vars_used.join(', ')} />
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '18px' }}>
+              <button onClick={onDismiss} style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '10px 22px',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+                color: 'var(--on-accent)',
+                fontFamily: 'var(--font-pixel)',
+                fontSize: '13px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}>
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Failure panel */}
+        {progress?.overall_status === 'failure' && progress.error && (
+          <div style={{ marginTop: '20px', paddingTop: '20px', borderTop: '1px solid var(--border)' }}>
+            <div style={{
+              fontSize: '11px',
+              color: 'var(--text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+              marginBottom: '10px'
+            }}>
+              Error
+            </div>
+            <DetailRow label="Reason" value={progress.error.reason} />
+            <DetailRow
+              label="Failed at phase"
+              value={progress.error.phase_where_failed ?? progress.steps?.find(s => s.status === 'failed')?.id ?? '—'}
+            />
+            {progress.error.last_error && (
+              <div style={{
+                marginTop: '10px',
+                padding: '12px',
+                backgroundColor: 'var(--surface-2)',
+                border: '1px solid var(--border)',
+                borderRadius: '6px',
+                fontFamily: 'var(--font-pixel)',
+                fontSize: '11px',
+                color: 'var(--text-muted)',
+                whiteSpace: 'pre-wrap',
+                maxHeight: '140px',
+                overflowY: 'auto'
+              }}>
+                {progress.error.last_error}
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '18px' }}>
+              <GhostButton onClick={onDismiss}>Close</GhostButton>
+              <button onClick={onRetry} style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '10px 22px',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+                color: 'var(--on-accent)',
+                fontFamily: 'var(--font-pixel)',
+                fontSize: '13px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}>
+                <RefreshCw size={12} /> Retry
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Cancelled state panel */}
+        {progress?.overall_status === 'cancelled' && (
+          <div style={{ marginTop: '20px', paddingTop: '20px', borderTop: '1px solid var(--border)' }}>
+            <div style={{
+              fontSize: '11px',
+              color: 'var(--text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+              marginBottom: '10px'
+            }}>
+              Cancelled
+            </div>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: '12px' }}>
+              The install was cancelled. You can retry anytime from this page, or close to discard it.
+            </p>
+            <DetailRow
+              label="Cancelled at phase"
+              value={progress.error?.phase_where_failed ?? progress.current_step_id ?? '—'}
+            />
+            {progress.error?.reason && (
+              <DetailRow label="Reason" value={progress.error.reason} />
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '18px' }}>
+              <GhostButton onClick={onDismiss}>Close</GhostButton>
+              <button onClick={onRetry} style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '10px 22px',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+                color: 'var(--on-accent)',
+                fontFamily: 'var(--font-pixel)',
+                fontSize: '13px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}>
+                <RefreshCw size={12} /> Try again
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1939,9 +3047,30 @@ function CarouselButton({ side, onClick, children }: { side: 'left' | 'right'; o
 
 /* ------------------------- INSTALLED PAGE ------------------------- */
 
-function InstalledPage() {
-  const totalCount = INSTALLED_REPOS.length;
-  const runningCount = INSTALLED_REPOS.filter(r => r.status === 'running').length;
+function InstalledPage({
+  activeInstalls,
+  onOpenInstall,
+}: {
+  activeInstalls: Record<string, ActiveInstall>;
+  onOpenInstall: (key: string) => void;
+}) {
+  const [entries, setEntries] = useState<InstalledEntry[]>(() => getInstalls());
+
+  useEffect(() => {
+    const onChange = () => setEntries(getInstalls());
+    window.addEventListener('shirim-installs-changed', onChange);
+    return () => window.removeEventListener('shirim-installs-changed', onChange);
+  }, []);
+
+  const handleUninstall = (owner_repo: string) => {
+    removeInstall(owner_repo);
+  };
+
+  const totalCount = entries.length;
+  const inProgressList = Object.entries(activeInstalls)
+    .map(([key, install]) => ({ key, install }))
+    .sort((a, b) => b.install.startedAt - a.install.startedAt);
+  const hasInProgress = inProgressList.length > 0;
 
   return (
     <div style={{ padding: '32px 40px 40px' }}>
@@ -1950,44 +3079,204 @@ function InstalledPage() {
           Installed
         </h1>
         <div style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <span>{totalCount} repositories</span>
-          <span style={{ color: 'var(--border)' }}>·</span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <div style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--running)' }} />
-            {runningCount} running
-          </span>
+          <span>{totalCount} {totalCount === 1 ? 'repository' : 'repositories'}</span>
         </div>
       </div>
       <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '32px' }}>
         Repositories cloned and built locally. Launch, update or remove them from here.
       </p>
 
-      {/* Column headers */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 140px 100px 120px 120px',
-        gap: '16px',
-        padding: '10px 16px',
-        fontSize: '11px',
-        color: 'var(--text-muted)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
-        borderBottom: '1px solid var(--border)'
-      }}>
-        <div>Repository</div>
-        <div>Version</div>
-        <div>Size</div>
-        <div>Last run</div>
-        <div style={{ textAlign: 'right' }}>Status</div>
-      </div>
+      {/* In-progress section — shown above the persisted list whenever any
+          install is active. Click a row to reopen the progress modal. */}
+      {hasInProgress && (
+        <div style={{ marginBottom: '32px' }}>
+          <div style={{
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.1em',
+            marginBottom: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px'
+          }}>
+            In progress
+            <div
+              className="pulse-dot"
+              style={{
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                backgroundColor: '#ffffff',
+                boxShadow: '0 0 6px rgba(255,255,255,0.5)'
+              }}
+            />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {inProgressList.map(({ key, install }) => (
+              <InProgressRow
+                key={key}
+                install={install}
+                onClick={() => onOpenInstall(key)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
-      {INSTALLED_REPOS.map(repo => <InstalledRow key={repo.id} repo={repo} />)}
+      {entries.length === 0 && !hasInProgress ? (
+        <div style={{
+          padding: '80px 20px',
+          textAlign: 'center',
+          color: 'var(--text-muted)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '12px',
+          border: '1px dashed var(--border)',
+          borderRadius: '10px',
+          backgroundColor: 'var(--surface)'
+        }}>
+          <Download size={28} color="var(--text-muted)" />
+          <div style={{ fontSize: '15px', color: 'var(--text-secondary)' }}>
+            Nothing installed yet
+          </div>
+          <div style={{ fontSize: '13px' }}>
+            Click <span style={{ color: 'var(--text-primary)' }}>Install</span> on any repo to see it here.
+          </div>
+        </div>
+      ) : entries.length > 0 && (
+        <>
+          {/* Column headers */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 200px 120px 120px',
+            gap: '16px',
+            padding: '10px 16px',
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            borderBottom: '1px solid var(--border)'
+          }}>
+            <div>Repository</div>
+            <div>Run command</div>
+            <div>Installed</div>
+            <div style={{ textAlign: 'right' }}>Status</div>
+          </div>
+
+          {entries.map(entry => (
+            <InstalledRow key={entry.owner_repo} entry={entry} onUninstall={handleUninstall} />
+          ))}
+        </>
+      )}
     </div>
   );
 }
 
-function InstalledRow({ repo }) {
+function InProgressRow({
+  install,
+  onClick,
+}: {
+  install: ActiveInstall;
+  onClick: () => void;
+}) {
   const [hover, setHover] = useState(false);
+  const [, forceTick] = useState(0);
+
+  // Force a re-render every second so the elapsed label ticks up smoothly
+  // even when the parent state hasn't changed.
+  useEffect(() => {
+    const id = window.setInterval(() => forceTick(t => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const { repo, progress, kickoffError, pollError, startedAt, cancelling } = install;
+  const terminal = isTerminalInstall(install);
+  const elapsedLabel = `${Math.max(0, Math.floor((Date.now() - startedAt) / 1000))}s`;
+
+  const activeStep =
+    kickoffError ? 'Kickoff failed' :
+    cancelling && !terminal ? 'Cancelling…' :
+    progress?.steps?.find(s => s.status === 'active')?.label ??
+    (progress?.overall_status === 'success' ? 'Completed' :
+     progress?.overall_status === 'cancelled' ? 'Cancelled' :
+     progress?.overall_status === 'failure' ? 'Failed' :
+     'Starting…');
+
+  const statusColor =
+    kickoffError || progress?.overall_status === 'failure' ? 'var(--error)' :
+    progress?.overall_status === 'cancelled' ? 'var(--text-muted)' :
+    progress?.overall_status === 'success' ? 'var(--accent)' :
+    'var(--accent)';
+
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '14px',
+        padding: '14px 16px',
+        borderRadius: '8px',
+        border: `1px solid ${hover ? 'var(--border-active)' : 'var(--border)'}`,
+        backgroundColor: hover ? 'var(--card-hover)' : 'var(--surface-2)',
+        cursor: 'pointer',
+        transition: 'all 120ms ease-out'
+      }}>
+      {/* Spinner or status icon */}
+      <div style={{ width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        {terminal ? (
+          progress?.overall_status === 'success' ? (
+            <Check size={16} color="var(--accent)" />
+          ) : progress?.overall_status === 'cancelled' ? (
+            <X size={16} color="var(--text-muted)" />
+          ) : (
+            <X size={16} color="var(--error)" />
+          )
+        ) : (
+          <span className="spinner" style={{ display: 'inline-flex' }}>
+            <RefreshCw size={16} color={statusColor} />
+          </span>
+        )}
+      </div>
+
+      {/* Main text column */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '3px' }}>
+          <div style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{repo.name}</div>
+          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{repo.repo}</div>
+        </div>
+        <div style={{
+          fontSize: '12px',
+          color: terminal && progress?.overall_status === 'failure' ? 'var(--error)' : 'var(--text-muted)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px'
+        }}>
+          <span>{activeStep}</span>
+          <span style={{ color: 'var(--border)' }}>·</span>
+          <span style={{ fontVariantNumeric: 'tabular-nums' }}>{elapsedLabel}</span>
+          {pollError && !terminal && (
+            <>
+              <span style={{ color: 'var(--border)' }}>·</span>
+              <span style={{ color: 'var(--error)' }}>reconnecting…</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Right chevron affordance */}
+      <ChevronRight size={16} color="var(--text-muted)" style={{ flexShrink: 0 }} />
+    </div>
+  );
+}
+
+function InstalledRow({ entry, onUninstall }: { entry: InstalledEntry; onUninstall: (owner_repo: string) => void }) {
+  const [hover, setHover] = useState(false);
+  const firstLetter = entry.name.charAt(0).toUpperCase();
 
   return (
     <div
@@ -1995,7 +3284,7 @@ function InstalledRow({ repo }) {
       onMouseLeave={() => setHover(false)}
       style={{
         display: 'grid',
-        gridTemplateColumns: '1fr 140px 100px 120px 120px',
+        gridTemplateColumns: '1fr 200px 120px 120px',
         gap: '16px',
         padding: '16px',
         alignItems: 'center',
@@ -2007,61 +3296,92 @@ function InstalledRow({ repo }) {
     >
       {/* Repo cell */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '14px', minWidth: 0 }}>
-        <div style={{
-          width: '44px', height: '44px', flexShrink: 0,
-          borderRadius: '6px',
-          backgroundImage: `url(https://picsum.photos/seed/${encodeURIComponent(repo.name)}/88/88)`,
-          backgroundSize: 'cover',
-          backgroundPosition: 'center',
-          border: '1px solid var(--border)'
-        }} />
+        {entry.image_url ? (
+          <div style={{
+            width: '44px', height: '44px', flexShrink: 0,
+            borderRadius: '6px',
+            backgroundImage: `url(${entry.image_url})`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            border: '1px solid var(--border)'
+          }} />
+        ) : (
+          <div style={{
+            width: '44px', height: '44px', flexShrink: 0,
+            borderRadius: '6px',
+            border: '1px solid var(--border)',
+            backgroundColor: 'var(--surface-2)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '18px',
+            fontFamily: 'var(--font-pixel)',
+            color: 'var(--text-secondary)',
+            fontWeight: 500
+          }}>
+            {firstLetter}
+          </div>
+        )}
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
-            <div style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{repo.name}</div>
-            <div style={{
-              fontSize: '10px', color: 'var(--text-secondary)',
-              padding: '2px 6px', borderRadius: '3px',
-              backgroundColor: 'var(--surface)',
-              textTransform: 'uppercase', letterSpacing: '0.05em'
-            }}>
-              {repo.language}
-            </div>
+            <div style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{entry.name}</div>
+            {entry.language && (
+              <div style={{
+                fontSize: '10px', color: 'var(--text-secondary)',
+                padding: '2px 6px', borderRadius: '3px',
+                backgroundColor: 'var(--surface)',
+                textTransform: 'uppercase', letterSpacing: '0.05em'
+              }}>
+                {entry.language}
+              </div>
+            )}
           </div>
           <div style={{
             fontSize: '12px', color: 'var(--text-muted)',
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
           }}>
-            {repo.desc}
+            {entry.desc}
           </div>
         </div>
       </div>
 
-      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>{repo.version}</div>
-      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>{repo.size}</div>
-      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{repo.lastRun}</div>
+      <div style={{
+        fontSize: '12px',
+        color: 'var(--text-secondary)',
+        fontFamily: 'var(--font-pixel)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }}>
+        {entry.result.run_command || '—'}
+      </div>
 
-      {/* Status + hover actions */}
+      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+        {formatRelative(entry.installed_at)}
+      </div>
+
+      {/* Hover actions vs. idle status */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px' }}>
         {hover ? (
           <>
-            <IconButton title={repo.status === 'running' ? 'Stop' : 'Run'}>
-              {repo.status === 'running' ? <Square size={13} /> : <Play size={13} />}
-            </IconButton>
+            <IconButton title="Run"><Play size={13} /></IconButton>
             <IconButton title="Update"><RefreshCw size={13} /></IconButton>
-            <IconButton title="Uninstall"><Trash2 size={13} /></IconButton>
+            <IconButton title="Uninstall" onClick={() => onUninstall(entry.owner_repo)}>
+              <Trash2 size={13} />
+            </IconButton>
           </>
         ) : (
           <div style={{
             display: 'flex', alignItems: 'center', gap: '6px',
             fontSize: '11px',
-            color: repo.status === 'running' ? 'var(--running)' : 'var(--text-muted)',
+            color: 'var(--text-muted)',
             textTransform: 'uppercase', letterSpacing: '0.05em'
           }}>
             <div style={{
               width: '6px', height: '6px', borderRadius: '50%',
-              backgroundColor: repo.status === 'running' ? 'var(--running)' : 'var(--idle)'
+              backgroundColor: 'var(--idle)'
             }} />
-            {repo.status}
+            installed
           </div>
         )}
       </div>
@@ -2069,14 +3389,14 @@ function InstalledRow({ repo }) {
   );
 }
 
-function IconButton({ children, title }: { children: ReactNode; title: string }) {
+function IconButton({ children, title, onClick }: { children: ReactNode; title: string; onClick?: () => void }) {
   const [hover, setHover] = useState(false);
   return (
     <button
       title={title}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      onClick={(e) => e.stopPropagation()}
+      onClick={(e) => { e.stopPropagation(); onClick?.(); }}
       style={{
         width: '28px', height: '28px',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
