@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle, Check } from 'lucide-react';
+import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, Square, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle, Check } from 'lucide-react';
 import {
   fetchHome, fetchDiscover, fetchRepoDetail,
   kickInstall, fetchInstallProgress, cancelInstall, deleteInstall,
   searchRepos,
+  startRun, fetchRunState, stopRun, fetchRunLogs,
+  listSecrets, addSecret, deleteSecret, revealSecret,
   type Repository, type RepoDetail, type InstallProgress, type InstallStep, type StepStatus,
+  type RunResponse, type RunStatus, type SecretEntry,
 } from './api';
 import {
   getInstalls, addInstall, removeInstall, snapshotFromDetail, formatRelative,
@@ -254,6 +257,82 @@ const REPLACEMENTS: ReplacementSection[] = [
 ];
 
 
+/* ------------------------- RUN (LAUNCH) STATE -------------------------
+ * In-memory state for running installed apps. Keyed by install_id.
+ * Lost on window reload (same as the backend's v1 run registry). */
+
+type RunEntry = {
+  run: RunResponse;
+  openedUrl: boolean;
+};
+
+type RunErrorState = {
+  installId: string;
+  installName: string;
+  status: RunStatus;
+  exitCode: number | null;
+  command: string;
+  logs: string[];
+};
+
+/** Compute the disk size of an install directory using `du -sh` via Node's
+ *  child_process. Works on macOS/Linux. Returns human-readable size like "124MB".
+ *  Results are cached in memory so tab-switching doesn't cause a brief "—" flash. */
+const _sizeCache = new Map<string, string>();
+
+function computeInstallSize(installId: string): Promise<string | null> {
+  const cached = _sizeCache.get(installId);
+  if (cached) return Promise.resolve(cached);
+
+  return new Promise(resolve => {
+    try {
+      const req = (window as any).require;
+      if (!req) { resolve(null); return; }
+      const { exec } = req('child_process');
+      const os = req('os');
+      const path = req('path');
+      const dir = path.join(os.homedir(), '.shirim', 'installs', installId);
+      exec(`du -sh "${dir}" 2>/dev/null`, { encoding: 'utf8' }, (err: any, stdout: string) => {
+        if (err || !stdout) { resolve(null); return; }
+        const raw = stdout.split('\t')[0].trim();
+        const size = raw.replace(/([KMGT])$/i, '$1B');
+        _sizeCache.set(installId, size);
+        resolve(size);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function getCachedSize(installId: string): string | null {
+  return _sizeCache.get(installId) ?? null;
+}
+
+/** Format elapsed time: "42s" under 60s, "2:05" at 60s+. */
+function formatElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${min}:${sec.toString().padStart(2, '0')}`;
+}
+
+/** Open a URL in the user's default browser. Uses Electron's shell.openExternal
+ *  when available; falls back to window.open for plain browser dev. */
+function openExternal(url: string): void {
+  try {
+    const req = (window as any).require;
+    if (req) {
+      const { shell } = req('electron');
+      shell.openExternal(url);
+      return;
+    }
+  } catch { /* not in Electron */ }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+
 /** App-level install state — hoisted out of InstallModal so polling survives
  *  the modal being closed. Keyed by "owner/repo". */
 type ActiveInstall = {
@@ -298,6 +377,14 @@ export default function App() {
   const [viewingInstallKey, setViewingInstallKey] = useState<string | null>(null);
   const pollTimersRef = useRef<Record<string, number>>({});
   const discoverPrefetchedRef = useRef(false);
+  const [activeRuns, setActiveRuns] = useState<Record<string, RunEntry>>({});
+  const [runError, setRunError] = useState<RunErrorState | null>(null);
+  const runPollTimersRef = useRef<Record<string, number>>({});
+  type RunningApp = { installId: string; url: string; name: string };
+  const [runningApps, setRunningApps] = useState<RunningApp[]>([]);
+  const [focusedAppId, setFocusedAppId] = useState<string | null>(null);
+  const focusedApp = runningApps.find(a => a.installId === focusedAppId) ?? null;
+  const [installedRepos, setInstalledRepos] = useState<InstalledEntry[]>(() => getInstalls());
   const [projectsByCategory, setProjectsByCategory] = useState<Record<string, Repository[]>>({
     Popular: HOME_POPULAR,
     'Recently Run': [],
@@ -405,12 +492,35 @@ export default function App() {
 
         pollTimersRef.current[key] = window.setTimeout(tick, 1000);
       } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Polling failed';
+
+        // 404 means the install session was lost (e.g. uvicorn restarted and
+        // the in-memory registry was cleared). Stop polling — don't retry
+        // infinitely against a dead install_id.
+        if (msg.includes('404')) {
+          delete pollTimersRef.current[key];
+          setActiveInstalls(prev => {
+            const entry = prev[key];
+            if (!entry) return prev;
+            return {
+              ...prev,
+              [key]: {
+                ...entry,
+                kickoffError: 'Install session lost — the backend was restarted. Close this and re-install.',
+                pollError: null,
+              },
+            };
+          });
+          return;
+        }
+
+        // Transient network error — retry with backoff.
         setActiveInstalls(prev => {
           const entry = prev[key];
           if (!entry) return prev;
           return {
             ...prev,
-            [key]: { ...entry, pollError: err instanceof Error ? err.message : 'Polling failed' },
+            [key]: { ...entry, pollError: msg },
           };
         });
         pollTimersRef.current[key] = window.setTimeout(tick, 2500);
@@ -540,6 +650,163 @@ export default function App() {
   }, []);
 
   const anyInstallRunning = Object.values(activeInstalls).some(isRunningInstall);
+
+  /* ------------------------- RUN (LAUNCH) ORCHESTRATION -------------------------
+   * Manages launching installed apps, polling for URL detection, opening in
+   * the system browser, handling crashes with a log-tail error dialog, and
+   * stopping processes via SIGTERM.
+   */
+
+  const clearRunPollTimer = (installId: string) => {
+    if (runPollTimersRef.current[installId]) {
+      window.clearInterval(runPollTimersRef.current[installId]);
+      delete runPollTimersRef.current[installId];
+    }
+  };
+
+  const processRunResponse = async (
+    installId: string,
+    entry: InstalledEntry | undefined,
+    r: RunResponse,
+  ) => {
+    setActiveRuns(prev => {
+      const existing = prev[installId];
+      return { ...prev, [installId]: { run: r, openedUrl: !!existing?.openedUrl } };
+    });
+
+    if (r.status === 'running' && r.url) {
+      setActiveRuns(prev => {
+        const cur = prev[installId];
+        if (cur && !cur.openedUrl) {
+          // Add to running apps list + focus it.
+          const newApp = { installId, url: r.url!, name: entry?.name ?? installId };
+          setRunningApps(prev => {
+            if (prev.some(a => a.installId === installId)) return prev;
+            return [...prev, newApp];
+          });
+          setFocusedAppId(installId);
+          return { ...prev, [installId]: { ...cur, openedUrl: true } };
+        }
+        return prev;
+      });
+      clearRunPollTimer(installId);
+      return;
+    }
+
+    if (r.status === 'starting') {
+      if (!runPollTimersRef.current[installId]) {
+        runPollTimersRef.current[installId] = window.setInterval(async () => {
+          try {
+            const rr = await fetchRunState(installId);
+            processRunResponse(installId, entry, rr);
+          } catch { /* transient network error — keep trying */ }
+        }, 1000);
+      }
+      return;
+    }
+
+    // Terminal: exited / crashed / stopped
+    clearRunPollTimer(installId);
+    setActiveRuns(prev => {
+      const { [installId]: _removed, ...rest } = prev;
+      return rest;
+    });
+    // Remove from the running apps tab bar.
+    setRunningApps(prev => prev.filter(a => a.installId !== installId));
+    if (focusedAppId === installId) setFocusedAppId(null);
+
+    if (r.status === 'crashed' || r.status === 'exited') {
+      let logs: string[] = [];
+      try {
+        const res = await fetchRunLogs(installId, 200);
+        logs = res.lines;
+      } catch { /* best-effort */ }
+      setRunError({
+        installId,
+        installName: entry?.name ?? installId,
+        status: r.status,
+        exitCode: r.exit_code,
+        command: r.command,
+        logs,
+      });
+    }
+  };
+
+  const startInstallRun = async (entry: InstalledEntry) => {
+    if (activeRuns[entry.install_id]) return;
+
+    setActiveRuns(prev => ({
+      ...prev,
+      [entry.install_id]: {
+        run: {
+          run_id: '',
+          install_id: entry.install_id,
+          command: entry.result.run_command,
+          pid: null,
+          url: null,
+          port: null,
+          status: 'starting',
+          started_at: Date.now() / 1000,
+          finished_at: null,
+          exit_code: null,
+        },
+        openedUrl: false,
+      },
+    }));
+
+    try {
+      const r = await startRun(entry.install_id);
+      await processRunResponse(entry.install_id, entry, r);
+    } catch (err) {
+      clearRunPollTimer(entry.install_id);
+      setActiveRuns(prev => {
+        const { [entry.install_id]: _removed, ...rest } = prev;
+        return rest;
+      });
+      setRunError({
+        installId: entry.install_id,
+        installName: entry.name,
+        status: 'crashed',
+        exitCode: null,
+        command: entry.result.run_command,
+        logs: [err instanceof Error ? err.message : 'Failed to start run'],
+      });
+    }
+  };
+
+  const stopInstallRun = async (installId: string) => {
+    try {
+      const r = await stopRun(installId);
+      await processRunResponse(installId, undefined, r);
+    } catch {
+      clearRunPollTimer(installId);
+      setActiveRuns(prev => {
+        const { [installId]: _removed, ...rest } = prev;
+        return rest;
+      });
+    }
+  };
+
+  // Cleanup run poll timers on unmount.
+  useEffect(() => {
+    return () => {
+      Object.values(runPollTimersRef.current).forEach(id => window.clearInterval(id));
+      runPollTimersRef.current = {};
+    };
+  }, []);
+
+  // Keep installedRepos in sync with localStorage so ProductPage can
+  // reactively know when a repo is already installed (→ show "Launch" not "Install").
+  useEffect(() => {
+    const onChange = () => setInstalledRepos(getInstalls());
+    window.addEventListener('shirim-installs-changed', onChange);
+    return () => window.removeEventListener('shirim-installs-changed', onChange);
+  }, []);
+
+  // Derive the matching InstalledEntry for the currently-viewed product page.
+  const matchedInstall = selectedProject?.repo
+    ? installedRepos.find(e => e.owner_repo === selectedProject.repo) ?? null
+    : null;
 
   // Only fetch project data once the user is authenticated — avoids pointless 401s.
   useEffect(() => {
@@ -692,7 +959,97 @@ export default function App() {
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', backgroundColor: 'var(--bg)' }}>
           <AuthScreen onAuthSuccess={() => setAuthed(true)} />
         </div>
+      ) : focusedApp ? (
+        <AppViewer
+          app={focusedApp}
+          onStop={async () => {
+            await stopInstallRun(focusedApp.installId);
+            setRunningApps(prev => prev.filter(a => a.installId !== focusedApp.installId));
+            setFocusedAppId(null);
+          }}
+          onHide={() => setFocusedAppId(null)}
+        />
       ) : (
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+
+      {/* Running apps tab bar — Chrome-style tabs for background apps */}
+      {runningApps.length > 0 && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '6px 16px',
+          backgroundColor: 'var(--surface)',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+          overflowX: 'auto'
+        }}>
+          {runningApps.map(app => (
+            <div
+              key={app.installId}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '5px 10px',
+                borderRadius: '6px',
+                border: '1px solid var(--border)',
+                backgroundColor: 'var(--surface-2)',
+                cursor: 'pointer',
+                fontSize: '12px',
+                color: 'var(--text-primary)',
+                fontFamily: 'var(--font-pixel)',
+                whiteSpace: 'nowrap',
+                transition: 'background-color 120ms ease-out'
+              }}
+            >
+              <div
+                className="pulse-dot"
+                style={{
+                  width: '5px',
+                  height: '5px',
+                  borderRadius: '50%',
+                  backgroundColor: 'var(--accent)',
+                  flexShrink: 0
+                }}
+              />
+              <span
+                onClick={() => setFocusedAppId(app.installId)}
+                style={{ cursor: 'pointer' }}
+              >
+                {app.name}
+              </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void (async () => {
+                    await stopInstallRun(app.installId);
+                    setRunningApps(prev => prev.filter(a => a.installId !== app.installId));
+                  })();
+                }}
+                title="Stop"
+                style={{
+                  width: '16px',
+                  height: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: '3px',
+                  border: 'none',
+                  backgroundColor: 'transparent',
+                  color: 'var(--text-muted)',
+                  cursor: 'pointer',
+                  padding: 0,
+                  flexShrink: 0
+                }}
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
 
       {/* 1. LEFT SIDEBAR */}
@@ -712,20 +1069,20 @@ export default function App() {
 
         {/* Main Nav */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
-          <NavItem icon={<Home size={18} />} label="Home" active={activeView === 'Home'} onClick={() => setActiveView('Home')} />
-          <NavItem icon={<Compass size={18} />} label="Discover" active={activeView === 'Discover'} onClick={() => setActiveView('Discover')} />
+          <NavItem icon={<Home size={18} />} label="Home" active={activeView === 'Home'} onClick={() => { setActiveView('Home'); setSelectedProject(null); }} />
+          <NavItem icon={<Compass size={18} />} label="Discover" active={activeView === 'Discover'} onClick={() => { setActiveView('Discover'); setSelectedProject(null); }} />
           <NavItem
             icon={<Download size={18} />}
             label="Installed"
             active={activeView === 'Installed'}
-            onClick={() => setActiveView('Installed')}
+            onClick={() => { setActiveView('Installed'); setSelectedProject(null); }}
             busy={anyInstallRunning}
           />
         </div>
 
         {/* Bottom Nav */}
         <div style={{ marginTop: 'auto', borderTop: '1px solid var(--border)', paddingTop: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <NavItem icon={<Settings size={18} />} label="Settings" active={activeView === 'Settings'} onClick={() => setActiveView('Settings')} />
+          <NavItem icon={<Settings size={18} />} label="Settings" active={activeView === 'Settings'} onClick={() => { setActiveView('Settings'); setSelectedProject(null); }} />
         </div>
       </div>
 
@@ -738,6 +1095,8 @@ export default function App() {
               project={selectedProject}
               onBack={() => setSelectedProject(null)}
               onInstall={(repo, detail) => startInstall(repo, detail)}
+              installedEntry={matchedInstall}
+              onLaunch={startInstallRun}
             />
           </div>
         ) : (
@@ -845,6 +1204,10 @@ export default function App() {
             <InstalledPage
               activeInstalls={activeInstalls}
               onOpenInstall={(key) => setViewingInstallKey(key)}
+              activeRuns={activeRuns}
+              onRun={startInstallRun}
+              onStop={stopInstallRun}
+              onSelectRepo={(repo) => setSelectedProject(repo)}
             />
           )}
           {activeView === 'Settings' && <SettingsPage theme={theme} setTheme={setTheme} />}
@@ -983,6 +1346,7 @@ export default function App() {
       </div>
 
       </div>
+      </div>
       )}
 
       {/* App-level install modal — rendered here so it survives view changes
@@ -994,6 +1358,19 @@ export default function App() {
           onRetry={() => retryInstall(viewingInstallKey)}
           onDismiss={() => dismissInstall(viewingInstallKey)}
           onCancel={() => cancelActiveInstall(viewingInstallKey)}
+        />
+      )}
+
+      {/* Run crash/exit error dialog — shows log tail + Retry. */}
+      {runError && (
+        <RunErrorDialog
+          state={runError}
+          onClose={() => setRunError(null)}
+          onRetry={() => {
+            const e = getInstalls().find(i => i.install_id === runError.installId);
+            setRunError(null);
+            if (e) startInstallRun(e);
+          }}
         />
       )}
     </div>
@@ -2003,6 +2380,157 @@ function PaginationButton({ disabled, onClick, children }: { disabled: boolean; 
 }
 
 
+/* ------------------------- APP VIEWER (EMBEDDED IFRAME) ------------------------- */
+
+function AppViewer({
+  app,
+  onStop,
+  onHide,
+}: {
+  app: { installId: string; url: string; name: string };
+  onStop: () => void;
+  onHide: () => void;
+}) {
+  const [stopping, setStopping] = useState(false);
+
+  const handleStop = async () => {
+    setStopping(true);
+    await onStop();
+  };
+
+  return (
+    <div style={{
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: 0
+    }}>
+      {/* Header bar */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '16px',
+        padding: '10px 20px',
+        borderBottom: '1px solid var(--border)',
+        backgroundColor: 'var(--surface)',
+        flexShrink: 0
+      }}>
+        {/* Back / hide button */}
+        <button
+          onClick={onHide}
+          title="Hide (app keeps running)"
+          style={{
+            display: 'flex', alignItems: 'center', gap: '6px',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            color: 'var(--text-secondary)',
+            padding: '6px 12px 6px 8px',
+            borderRadius: '6px',
+            fontFamily: 'var(--font-pixel)',
+            fontSize: '12px',
+            cursor: 'pointer'
+          }}>
+          <ChevronLeft size={14} />
+          Back
+        </button>
+
+        {/* App name + running indicator */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div className="pulse-dot" style={{
+            width: '6px', height: '6px', borderRadius: '50%',
+            backgroundColor: 'var(--accent)',
+            flexShrink: 0
+          }} />
+          <span style={{
+            fontSize: '13px',
+            color: 'var(--text-primary)',
+            fontWeight: 500,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}>
+            {app.name}
+          </span>
+          <span style={{
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-pixel)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}>
+            {app.url}
+          </span>
+        </div>
+
+        {/* Open externally */}
+        <button
+          onClick={() => openExternal(app.url)}
+          title="Open in browser"
+          style={{
+            display: 'flex', alignItems: 'center', gap: '6px',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            color: 'var(--text-secondary)',
+            padding: '6px 12px',
+            borderRadius: '6px',
+            fontFamily: 'var(--font-pixel)',
+            fontSize: '12px',
+            cursor: 'pointer'
+          }}>
+          <ExternalLink size={12} />
+          Browser
+        </button>
+
+        {/* Stop button */}
+        <button
+          onClick={handleStop}
+          disabled={stopping}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '6px',
+            padding: '6px 14px',
+            borderRadius: '6px',
+            border: 'none',
+            backgroundColor: 'var(--error)',
+            color: '#ffffff',
+            fontFamily: 'var(--font-pixel)',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            cursor: stopping ? 'not-allowed' : 'pointer',
+            opacity: stopping ? 0.6 : 1
+          }}>
+          {stopping ? (
+            <>
+              <span className="spinner" style={{ display: 'inline-flex' }}>
+                <RefreshCw size={11} />
+              </span>
+              Stopping…
+            </>
+          ) : (
+            <>
+              <Square size={11} />
+              Stop
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Iframe — the running app */}
+      <iframe
+        src={app.url}
+        title={`${app.name} — ${app.url}`}
+        style={{
+          flex: 1,
+          width: '100%',
+          border: 'none',
+          backgroundColor: '#ffffff'
+        }}
+      />
+    </div>
+  );
+}
+
+
 /* ------------------------- BACKEND ERROR STATE ------------------------- */
 
 function BackendErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -2061,10 +2589,14 @@ function ProductPage({
   project,
   onBack,
   onInstall,
+  installedEntry,
+  onLaunch,
 }: {
   project: Repository;
   onBack: () => void;
   onInstall: (repo: Repository, detail: RepoDetail | null) => void;
+  installedEntry?: InstalledEntry | null;
+  onLaunch?: (entry: InstalledEntry) => void;
 }) {
   // Seed from cache synchronously if we have it — this makes cache-hit navigations
   // instant (no loading state flash) even before the useEffect fires.
@@ -2177,26 +2709,47 @@ function ProductPage({
 
       {/* Action buttons — Install (accent) + View on GitHub (ghost) + difficulty badge */}
       <div style={{ display: 'flex', gap: '12px', marginTop: '28px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <button
-          onClick={() => onInstall(project, detail)}
-          disabled={!project.repo}
-          style={{
-            display: 'flex', alignItems: 'center', gap: '8px',
-            padding: '12px 24px',
-            borderRadius: '8px',
-            border: 'none',
-            background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
-            color: 'var(--on-accent)',
-            fontFamily: 'var(--font-pixel)',
-            fontSize: '14px',
-            fontWeight: 'bold',
-            cursor: project.repo ? 'pointer' : 'not-allowed',
-            opacity: project.repo ? 1 : 0.45,
-            boxShadow: '0 0 0 1px var(--accent), 0 6px 20px var(--accent-glow)'
-          }}>
-          <Download size={14} />
-          Install
-        </button>
+        {installedEntry && onLaunch ? (
+          <button
+            onClick={() => onLaunch(installedEntry)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              padding: '12px 24px',
+              borderRadius: '8px',
+              border: 'none',
+              background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+              color: 'var(--on-accent)',
+              fontFamily: 'var(--font-pixel)',
+              fontSize: '14px',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+              boxShadow: '0 0 0 1px var(--accent), 0 6px 20px var(--accent-glow)'
+            }}>
+            <Play size={14} fill="currentColor" />
+            Launch
+          </button>
+        ) : (
+          <button
+            onClick={() => onInstall(project, detail)}
+            disabled={!project.repo}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              padding: '12px 24px',
+              borderRadius: '8px',
+              border: 'none',
+              background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+              color: 'var(--on-accent)',
+              fontFamily: 'var(--font-pixel)',
+              fontSize: '14px',
+              fontWeight: 'bold',
+              cursor: project.repo ? 'pointer' : 'not-allowed',
+              opacity: project.repo ? 1 : 0.45,
+              boxShadow: '0 0 0 1px var(--accent), 0 6px 20px var(--accent-glow)'
+            }}>
+            <Download size={14} />
+            Install
+          </button>
+        )}
 
         {githubUrl && (
           <a
@@ -2464,7 +3017,16 @@ function InstallModal({
   onCancel: () => void;        // POST /api/v1/install/{id}/cancel, stay on modal
 }) {
   const { repo: project, progress, kickoffError, pollError, startedAt, cancelling } = install;
-  const isTerminal = progress?.overall_status === 'success' || progress?.overall_status === 'failure' || !!kickoffError;
+  const isTerminal = progress?.overall_status === 'success' || progress?.overall_status === 'failure' || progress?.overall_status === 'cancelled' || !!kickoffError;
+
+  // Force a re-render every second so the elapsed timer ticks up smoothly.
+  // Stops once the install reaches a terminal state.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (isTerminal) return;
+    const id = window.setInterval(() => tick(t => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [isTerminal]);
 
   // ESC to close — always allowed, even while running. Install keeps going in the background.
   useEffect(() => {
@@ -2476,8 +3038,12 @@ function InstallModal({
   }, [onClose]);
 
   const stepsToRender: InstallStep[] = progress?.steps ?? FALLBACK_STEPS;
-  const elapsedMs = progress?.duration_ms ?? (Date.now() - startedAt);
-  const elapsedLabel = `${Math.max(0, Math.floor(elapsedMs / 1000))}s`;
+  // While running, always use the local clock so the timer ticks every second.
+  // On terminal state, lock to the backend's final duration_ms for accuracy.
+  const elapsedMs = isTerminal
+    ? (progress?.duration_ms ?? (Date.now() - startedAt))
+    : (Date.now() - startedAt);
+  const elapsedLabel = formatElapsed(elapsedMs);
 
   let title = `Installing ${project.repo ?? project.name}`;
   if (progress?.overall_status === 'success') title = 'Installed';
@@ -2880,6 +3446,141 @@ function InstallModal({
 
 /* ------------------------- IMAGE CAROUSEL ------------------------- */
 
+/* ------------------------- RUN ERROR DIALOG ------------------------- */
+
+function RunErrorDialog({
+  state,
+  onClose,
+  onRetry,
+}: {
+  state: RunErrorState;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: 'fixed',
+        top: '32px',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.6)',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '32px',
+        zIndex: 100
+      }}>
+      <div className="fade-in" style={{
+        width: '100%',
+        maxWidth: '600px',
+        maxHeight: 'calc(100vh - 128px)',
+        overflowY: 'auto',
+        backgroundColor: 'var(--surface)',
+        border: '1px solid var(--border)',
+        borderRadius: '12px',
+        padding: '28px',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.4)'
+      }}>
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px', gap: '16px' }}>
+          <div>
+            <h2 style={{ fontSize: '18px', fontWeight: 500, color: 'var(--text-primary)', marginBottom: '4px' }}>
+              {state.status === 'crashed' ? 'Crashed' : 'Exited'}
+            </h2>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{state.installName}</div>
+          </div>
+          <button onClick={onClose} style={{
+            width: '28px', height: '28px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            borderRadius: '6px', border: '1px solid var(--border)',
+            backgroundColor: 'transparent', color: 'var(--text-muted)',
+            cursor: 'pointer', flexShrink: 0, padding: 0
+          }}>
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Error summary */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '12px',
+          padding: '14px',
+          backgroundColor: 'var(--surface-2)',
+          border: '1px solid var(--border)',
+          borderRadius: '8px',
+          marginBottom: '18px'
+        }}>
+          <AlertTriangle size={18} color="var(--error)" style={{ flexShrink: 0 }} />
+          <div style={{ fontSize: '13px', color: 'var(--text-primary)' }}>
+            {state.status === 'crashed' ? 'Process exited unexpectedly' : 'Process exited'}
+            {state.exitCode !== null && ` with code ${state.exitCode}`}
+          </div>
+        </div>
+
+        <DetailRow label="Command" value={state.command || '—'} />
+
+        {/* Log tail */}
+        <div style={{ marginTop: '18px' }}>
+          <div style={{
+            fontSize: '11px', color: 'var(--text-muted)',
+            textTransform: 'uppercase', letterSpacing: '0.1em',
+            marginBottom: '10px', paddingBottom: '8px', borderBottom: '1px solid var(--border)'
+          }}>
+            Log tail
+          </div>
+          <div className="hide-scrollbar" style={{
+            padding: '14px',
+            backgroundColor: 'var(--surface-2)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            fontFamily: 'var(--font-pixel)',
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            whiteSpace: 'pre-wrap',
+            maxHeight: '240px',
+            overflowY: 'auto',
+            lineHeight: 1.7
+          }}>
+            {state.logs.length > 0 ? state.logs.join('\n') : '(no output captured)'}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
+          <GhostButton onClick={onClose}>Close</GhostButton>
+          <button onClick={onRetry} style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            padding: '10px 22px',
+            borderRadius: '6px',
+            border: 'none',
+            background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+            color: 'var(--on-accent)',
+            fontFamily: 'var(--font-pixel)',
+            fontSize: '13px',
+            fontWeight: 'bold',
+            cursor: 'pointer'
+          }}>
+            <RefreshCw size={12} /> Retry
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ------------------------- IMAGE CAROUSEL ------------------------- */
+
 function ImageCarousel({ images, fallbackName, loading, accent = false }: { images: string[]; fallbackName: string; loading: boolean; accent?: boolean }) {
   const [index, setIndex] = useState(0);
   const [failed, setFailed] = useState<Set<number>>(new Set());
@@ -3050,9 +3751,17 @@ function CarouselButton({ side, onClick, children }: { side: 'left' | 'right'; o
 function InstalledPage({
   activeInstalls,
   onOpenInstall,
+  activeRuns,
+  onRun,
+  onStop,
+  onSelectRepo,
 }: {
   activeInstalls: Record<string, ActiveInstall>;
   onOpenInstall: (key: string) => void;
+  activeRuns: Record<string, RunEntry>;
+  onRun: (entry: InstalledEntry) => void;
+  onStop: (installId: string) => void;
+  onSelectRepo: (repo: Repository) => void;
 }) {
   const [entries, setEntries] = useState<InstalledEntry[]>(() => getInstalls());
 
@@ -3062,8 +3771,25 @@ function InstalledPage({
     return () => window.removeEventListener('shirim-installs-changed', onChange);
   }, []);
 
-  const handleUninstall = (owner_repo: string) => {
-    removeInstall(owner_repo);
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
+
+  const handleUninstall = async (entry: InstalledEntry) => {
+    // Show spinner immediately
+    setDeleting(prev => new Set(prev).add(entry.owner_repo));
+    try {
+      // Wipe the disk directory via the backend
+      await deleteInstall(entry.install_id);
+    } catch {
+      // Best-effort — still remove from the local list even if the backend call fails
+      // (e.g. directory was already deleted manually)
+    }
+    // Remove from localStorage + update the UI list
+    removeInstall(entry.owner_repo);
+    setDeleting(prev => {
+      const next = new Set(prev);
+      next.delete(entry.owner_repo);
+      return next;
+    });
   };
 
   const totalCount = entries.length;
@@ -3071,6 +3797,9 @@ function InstalledPage({
     .map(([key, install]) => ({ key, install }))
     .sort((a, b) => b.install.startedAt - a.install.startedAt);
   const hasInProgress = inProgressList.length > 0;
+  const hasAnyRows = hasInProgress || entries.length > 0;
+
+  const GRID_COLS = '1fr 100px 120px 140px';
 
   return (
     <div style={{ padding: '32px 40px 40px' }}>
@@ -3086,45 +3815,7 @@ function InstalledPage({
         Repositories cloned and built locally. Launch, update or remove them from here.
       </p>
 
-      {/* In-progress section — shown above the persisted list whenever any
-          install is active. Click a row to reopen the progress modal. */}
-      {hasInProgress && (
-        <div style={{ marginBottom: '32px' }}>
-          <div style={{
-            fontSize: '11px',
-            color: 'var(--text-muted)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.1em',
-            marginBottom: '12px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px'
-          }}>
-            In progress
-            <div
-              className="pulse-dot"
-              style={{
-                width: '6px',
-                height: '6px',
-                borderRadius: '50%',
-                backgroundColor: '#ffffff',
-                boxShadow: '0 0 6px rgba(255,255,255,0.5)'
-              }}
-            />
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {inProgressList.map(({ key, install }) => (
-              <InProgressRow
-                key={key}
-                install={install}
-                onClick={() => onOpenInstall(key)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {entries.length === 0 && !hasInProgress ? (
+      {!hasAnyRows ? (
         <div style={{
           padding: '80px 20px',
           textAlign: 'center',
@@ -3145,12 +3836,12 @@ function InstalledPage({
             Click <span style={{ color: 'var(--text-primary)' }}>Install</span> on any repo to see it here.
           </div>
         </div>
-      ) : entries.length > 0 && (
+      ) : (
         <>
           {/* Column headers */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '1fr 200px 120px 120px',
+            gridTemplateColumns: GRID_COLS,
             gap: '16px',
             padding: '10px 16px',
             fontSize: '11px',
@@ -3160,13 +3851,42 @@ function InstalledPage({
             borderBottom: '1px solid var(--border)'
           }}>
             <div>Repository</div>
-            <div>Run command</div>
+            <div>Size</div>
             <div>Installed</div>
-            <div style={{ textAlign: 'right' }}>Status</div>
+            <div style={{ textAlign: 'right' }}>Actions</div>
           </div>
 
+          {/* In-progress installs — rendered as table rows at the top */}
+          {inProgressList.map(({ key, install }) => (
+            <InProgressTableRow
+              key={key}
+              install={install}
+              gridCols={GRID_COLS}
+              onClick={() => onOpenInstall(key)}
+            />
+          ))}
+
+          {/* Completed installs */}
           {entries.map(entry => (
-            <InstalledRow key={entry.owner_repo} entry={entry} onUninstall={handleUninstall} />
+            <InstalledRow
+              key={entry.owner_repo}
+              entry={entry}
+              gridCols={GRID_COLS}
+              onUninstall={() => handleUninstall(entry)}
+              isDeleting={deleting.has(entry.owner_repo)}
+              runEntry={activeRuns[entry.install_id]}
+              onRun={() => onRun(entry)}
+              onStop={() => onStop(entry.install_id)}
+              onSelect={() => onSelectRepo({
+                id: 0,
+                name: entry.name,
+                repo: entry.owner_repo,
+                desc: entry.desc,
+                language: entry.language,
+                stars: entry.stars,
+                summary: null,
+              })}
+            />
           ))}
         </>
       )}
@@ -3174,29 +3894,36 @@ function InstalledPage({
   );
 }
 
-function InProgressRow({
+function InProgressTableRow({
   install,
+  gridCols,
   onClick,
 }: {
   install: ActiveInstall;
+  gridCols: string;
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
-  const [, forceTick] = useState(0);
+  const { repo, progress, kickoffError, cancelling } = install;
+  const terminal = isTerminalInstall(install);
 
-  // Force a re-render every second so the elapsed label ticks up smoothly
-  // even when the parent state hasn't changed.
+  const [, forceTick] = useState(0);
   useEffect(() => {
+    if (terminal) return;
     const id = window.setInterval(() => forceTick(t => t + 1), 1000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [terminal]);
 
-  const { repo, progress, kickoffError, pollError, startedAt, cancelling } = install;
-  const terminal = isTerminalInstall(install);
-  const elapsedLabel = `${Math.max(0, Math.floor((Date.now() - startedAt) / 1000))}s`;
+  // Use local clock while running so the tick forces a live update every second.
+  // Lock to backend's duration_ms only on terminal for an accurate final count.
+  const elapsedLabel = formatElapsed(
+    terminal
+      ? (progress?.duration_ms ?? (Date.now() - install.startedAt))
+      : (Date.now() - install.startedAt)
+  );
 
   const activeStep =
-    kickoffError ? 'Kickoff failed' :
+    kickoffError ? 'Failed to start' :
     cancelling && !terminal ? 'Cancelling…' :
     progress?.steps?.find(s => s.status === 'active')?.label ??
     (progress?.overall_status === 'success' ? 'Completed' :
@@ -3204,11 +3931,7 @@ function InProgressRow({
      progress?.overall_status === 'failure' ? 'Failed' :
      'Starting…');
 
-  const statusColor =
-    kickoffError || progress?.overall_status === 'failure' ? 'var(--error)' :
-    progress?.overall_status === 'cancelled' ? 'var(--text-muted)' :
-    progress?.overall_status === 'success' ? 'var(--accent)' :
-    'var(--accent)';
+  const isFailed = kickoffError || progress?.overall_status === 'failure';
 
   return (
     <div
@@ -3216,82 +3939,119 @@ function InProgressRow({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '14px',
-        padding: '14px 16px',
-        borderRadius: '8px',
-        border: `1px solid ${hover ? 'var(--border-active)' : 'var(--border)'}`,
-        backgroundColor: hover ? 'var(--card-hover)' : 'var(--surface-2)',
-        cursor: 'pointer',
-        transition: 'all 120ms ease-out'
-      }}>
-      {/* Spinner or status icon */}
-      <div style={{ width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        {terminal ? (
-          progress?.overall_status === 'success' ? (
-            <Check size={16} color="var(--accent)" />
-          ) : progress?.overall_status === 'cancelled' ? (
-            <X size={16} color="var(--text-muted)" />
-          ) : (
-            <X size={16} color="var(--error)" />
-          )
-        ) : (
-          <span className="spinner" style={{ display: 'inline-flex' }}>
-            <RefreshCw size={16} color={statusColor} />
-          </span>
-        )}
-      </div>
-
-      {/* Main text column */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '3px' }}>
-          <div style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{repo.name}</div>
-          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{repo.repo}</div>
-        </div>
-        <div style={{
-          fontSize: '12px',
-          color: terminal && progress?.overall_status === 'failure' ? 'var(--error)' : 'var(--text-muted)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px'
-        }}>
-          <span>{activeStep}</span>
-          <span style={{ color: 'var(--border)' }}>·</span>
-          <span style={{ fontVariantNumeric: 'tabular-nums' }}>{elapsedLabel}</span>
-          {pollError && !terminal && (
-            <>
-              <span style={{ color: 'var(--border)' }}>·</span>
-              <span style={{ color: 'var(--error)' }}>reconnecting…</span>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Right chevron affordance */}
-      <ChevronRight size={16} color="var(--text-muted)" style={{ flexShrink: 0 }} />
-    </div>
-  );
-}
-
-function InstalledRow({ entry, onUninstall }: { entry: InstalledEntry; onUninstall: (owner_repo: string) => void }) {
-  const [hover, setHover] = useState(false);
-  const firstLetter = entry.name.charAt(0).toUpperCase();
-
-  return (
-    <div
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
         display: 'grid',
-        gridTemplateColumns: '1fr 200px 120px 120px',
+        gridTemplateColumns: gridCols,
         gap: '16px',
         padding: '16px',
         alignItems: 'center',
         borderBottom: '1px solid var(--border)',
         backgroundColor: hover ? 'var(--card-hover)' : 'transparent',
         transition: 'background-color 160ms ease-out',
-        position: 'relative'
+        cursor: 'pointer'
+      }}>
+      {/* Repo cell — 44px icon container matches InstalledRow's thumbnail width */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '14px', minWidth: 0 }}>
+        <div style={{
+          width: '44px', height: '44px', flexShrink: 0,
+          borderRadius: '6px',
+          border: '1px solid var(--border)',
+          backgroundColor: 'var(--surface-2)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}>
+          {terminal ? (
+            isFailed ? <X size={16} color="var(--error)" /> : <Check size={16} color="var(--accent)" />
+          ) : (
+            <span className="spinner" style={{ display: 'inline-flex' }}>
+              <RefreshCw size={16} color="var(--accent)" />
+            </span>
+          )}
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '3px' }}>
+            <div style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{repo.name}</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{repo.repo}</div>
+          </div>
+          <div style={{
+            fontSize: '12px',
+            color: isFailed ? 'var(--error)' : 'var(--text-muted)'
+          }}>
+            {activeStep}
+          </div>
+        </div>
+      </div>
+
+      {/* Size */}
+      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>—</div>
+
+      {/* Installed / Elapsed */}
+      <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+        Started {elapsedLabel} ago
+      </div>
+
+      {/* Actions */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+        <div style={{
+          fontSize: '11px',
+          color: hover ? 'var(--accent)' : 'var(--text-muted)',
+          textDecoration: hover ? 'underline' : 'none',
+          textUnderlineOffset: '3px',
+          transition: 'color 120ms ease-out',
+          cursor: 'pointer'
+        }}>
+          view progress
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InstalledRow({
+  entry,
+  gridCols,
+  onUninstall,
+  isDeleting,
+  runEntry,
+  onRun,
+  onStop,
+  onSelect,
+}: {
+  entry: InstalledEntry;
+  gridCols: string;
+  onUninstall: () => void;
+  isDeleting: boolean;
+  runEntry?: RunEntry;
+  onRun: () => void;
+  onStop: () => void;
+  onSelect: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [diskSize, setDiskSize] = useState<string | null>(() => getCachedSize(entry.install_id));
+  const firstLetter = entry.name.charAt(0).toUpperCase();
+  const runStatus = runEntry?.run.status;
+  const isStarting = runStatus === 'starting';
+  const isRunning = runStatus === 'running';
+
+  useEffect(() => {
+    computeInstallSize(entry.install_id).then(s => setDiskSize(s));
+  }, [entry.install_id]);
+
+  return (
+    <div
+      onClick={onSelect}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: 'grid',
+        gridTemplateColumns: gridCols,
+        gap: '16px',
+        padding: '16px',
+        alignItems: 'center',
+        borderBottom: '1px solid var(--border)',
+        backgroundColor: hover ? 'var(--card-hover)' : 'transparent',
+        transition: 'background-color 160ms ease-out',
+        cursor: 'pointer'
       }}
     >
       {/* Repo cell */}
@@ -3345,43 +4105,54 @@ function InstalledRow({ entry, onUninstall }: { entry: InstalledEntry; onUninsta
         </div>
       </div>
 
-      <div style={{
-        fontSize: '12px',
-        color: 'var(--text-secondary)',
-        fontFamily: 'var(--font-pixel)',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap'
-      }}>
-        {entry.result.run_command || '—'}
+      {/* Size — computed from ~/.shirim/installs/{id}/ via du -sh */}
+      <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+        {diskSize ?? '—'}
       </div>
 
+      {/* Installed */}
       <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
         {formatRelative(entry.installed_at)}
       </div>
 
-      {/* Hover actions vs. idle status */}
+      {/* Actions */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px' }}>
-        {hover ? (
+        {isDeleting ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: 'var(--text-muted)' }}>
+            <span className="spinner" style={{ display: 'inline-flex' }}>
+              <RefreshCw size={12} />
+            </span>
+            deleting…
+          </div>
+        ) : hover ? (
           <>
-            <IconButton title="Run"><Play size={13} /></IconButton>
+            {isStarting ? (
+              <IconButton title="Starting…">
+                <span className="spinner" style={{ display: 'inline-flex' }}>
+                  <RefreshCw size={13} />
+                </span>
+              </IconButton>
+            ) : isRunning ? (
+              <IconButton title="Stop" onClick={onStop}>
+                <Square size={13} />
+              </IconButton>
+            ) : (
+              <IconButton title="Run" onClick={onRun}>
+                <Play size={13} />
+              </IconButton>
+            )}
             <IconButton title="Update"><RefreshCw size={13} /></IconButton>
-            <IconButton title="Uninstall" onClick={() => onUninstall(entry.owner_repo)}>
+            <IconButton title="Uninstall" onClick={onUninstall}>
               <Trash2 size={13} />
             </IconButton>
           </>
         ) : (
           <div style={{
-            display: 'flex', alignItems: 'center', gap: '6px',
             fontSize: '11px',
             color: 'var(--text-muted)',
-            textTransform: 'uppercase', letterSpacing: '0.05em'
+            letterSpacing: '0.03em'
           }}>
-            <div style={{
-              width: '6px', height: '6px', borderRadius: '50%',
-              backgroundColor: 'var(--idle)'
-            }} />
-            installed
+            see actions
           </div>
         )}
       </div>
@@ -3415,6 +4186,302 @@ function IconButton({ children, title, onClick }: { children: ReactNode; title: 
 
 /* ------------------------- SETTINGS PAGE ------------------------- */
 
+/* ------------------------- API KEYS SECTION (SETTINGS) ------------------------- */
+
+function ApiKeysSection() {
+  const [secrets, setSecrets] = useState<SecretEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newName, setNewName] = useState('');
+  const [newValue, setNewValue] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [nameFocused, setNameFocused] = useState(false);
+  const [valueFocused, setValueFocused] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await listSecrets();
+      setSecrets(r.secrets);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load secrets');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const handleAdd = async () => {
+    if (!newName.trim() || !newValue.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await addSecret(newName.trim().toUpperCase(), newValue.trim());
+      setNewName('');
+      setNewValue('');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (name: string) => {
+    setError(null);
+    try {
+      await deleteSecret(name);
+      setSecrets(prev => prev.filter(s => s.name !== name));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete');
+    }
+  };
+
+  const handleCopy = async (name: string) => {
+    try {
+      const r = await revealSecret(name);
+      await navigator.clipboard.writeText(r.value);
+    } catch {
+      // fallback: ignore if clipboard fails
+    }
+  };
+
+  return (
+    <>
+      <SectionHeader>API Keys</SectionHeader>
+      <p style={{
+        fontSize: '12px',
+        color: 'var(--text-muted)',
+        lineHeight: 1.5,
+        marginBottom: '18px'
+      }}>
+        Keys are injected as environment variables when you install or run apps.
+        Stored locally in <code style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-pixel)' }}>~/.shirim/secrets.json</code> (chmod 600).
+      </p>
+
+      {error && (
+        <div style={{
+          fontSize: '12px',
+          color: 'var(--error)',
+          backgroundColor: 'var(--surface-2)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '10px 14px',
+          marginBottom: '14px'
+        }}>
+          {error}
+        </div>
+      )}
+
+      {loading && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '10px',
+          padding: '14px 0',
+          fontSize: '12px', color: 'var(--text-muted)'
+        }}>
+          <span className="spinner" style={{ display: 'inline-flex' }}>
+            <RefreshCw size={13} />
+          </span>
+          Loading keys…
+        </div>
+      )}
+
+      {/* Existing keys */}
+      {!loading && secrets.length > 0 && (
+        <div style={{ marginBottom: '18px' }}>
+          {secrets.map(s => (
+            <ApiKeyRow
+              key={s.name}
+              secret={s}
+              onDelete={() => handleDelete(s.name)}
+              onCopy={() => handleCopy(s.name)}
+            />
+          ))}
+        </div>
+      )}
+
+      {!loading && secrets.length === 0 && !error && (
+        <div style={{
+          fontSize: '12px',
+          color: 'var(--text-muted)',
+          padding: '14px 0',
+          marginBottom: '12px'
+        }}>
+          No API keys configured yet.
+        </div>
+      )}
+
+      {/* Add new key form */}
+      <div style={{
+        display: 'flex',
+        gap: '10px',
+        alignItems: 'flex-end',
+        flexWrap: 'wrap'
+      }}>
+        <div style={{ flex: '1 1 160px', minWidth: '140px' }}>
+          <div style={{
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            marginBottom: '6px',
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em'
+          }}>
+            Key name
+          </div>
+          <input
+            placeholder="OPENAI_API_KEY"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ''))}
+            onFocus={() => setNameFocused(true)}
+            onBlur={() => setNameFocused(false)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
+            style={{
+              width: '100%',
+              backgroundColor: 'var(--surface-2)',
+              border: `1px solid ${nameFocused ? 'var(--accent)' : 'var(--border)'}`,
+              borderRadius: '6px',
+              padding: '10px 12px',
+              fontFamily: 'var(--font-pixel)',
+              fontSize: '12px',
+              color: 'var(--text-primary)',
+              outline: 'none',
+              transition: 'border-color 120ms ease-out',
+              letterSpacing: '0.05em'
+            }}
+          />
+        </div>
+        <div style={{ flex: '2 1 220px', minWidth: '180px' }}>
+          <div style={{
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            marginBottom: '6px',
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em'
+          }}>
+            Value
+          </div>
+          <input
+            placeholder="sk-proj-..."
+            type="password"
+            value={newValue}
+            onChange={(e) => setNewValue(e.target.value)}
+            onFocus={() => setValueFocused(true)}
+            onBlur={() => setValueFocused(false)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); }}
+            style={{
+              width: '100%',
+              backgroundColor: 'var(--surface-2)',
+              border: `1px solid ${valueFocused ? 'var(--accent)' : 'var(--border)'}`,
+              borderRadius: '6px',
+              padding: '10px 12px',
+              fontFamily: 'var(--font-pixel)',
+              fontSize: '12px',
+              color: 'var(--text-primary)',
+              outline: 'none',
+              transition: 'border-color 120ms ease-out'
+            }}
+          />
+        </div>
+        <button
+          onClick={handleAdd}
+          disabled={!newName.trim() || !newValue.trim() || saving}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            padding: '10px 18px',
+            borderRadius: '6px',
+            border: 'none',
+            background: !newName.trim() || !newValue.trim() || saving
+              ? 'var(--surface-2)'
+              : 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+            color: !newName.trim() || !newValue.trim() || saving
+              ? 'var(--text-muted)'
+              : 'var(--on-accent)',
+            fontFamily: 'var(--font-pixel)',
+            fontSize: '12px',
+            fontWeight: 'bold',
+            cursor: !newName.trim() || !newValue.trim() || saving ? 'not-allowed' : 'pointer',
+            flexShrink: 0,
+            whiteSpace: 'nowrap'
+          }}>
+          {saving ? (
+            <>
+              <span className="spinner" style={{ display: 'inline-flex' }}>
+                <RefreshCw size={12} />
+              </span>
+              Saving…
+            </>
+          ) : (
+            '+ Add key'
+          )}
+        </button>
+      </div>
+
+      {/* Bottom border to separate from the next section */}
+      <div style={{ borderBottom: '1px solid var(--border)', marginTop: '18px' }} />
+    </>
+  );
+}
+
+function ApiKeyRow({
+  secret,
+  onDelete,
+  onCopy,
+}: {
+  secret: SecretEntry;
+  onDelete: () => void;
+  onCopy: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: '16px',
+        padding: '12px 0',
+        borderBottom: '1px solid var(--border)'
+      }}>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{
+          fontSize: '13px',
+          color: 'var(--text-primary)',
+          fontFamily: 'var(--font-pixel)',
+          letterSpacing: '0.04em',
+          marginBottom: '3px'
+        }}>
+          {secret.name}
+        </div>
+        <div style={{
+          fontSize: '12px',
+          color: 'var(--text-muted)',
+          fontFamily: 'var(--font-pixel)',
+          letterSpacing: '0.08em'
+        }}>
+          {secret.masked_value}
+        </div>
+      </div>
+
+      {hover && (
+        <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+          <IconButton title="Copy value" onClick={onCopy}>
+            <ExternalLink size={12} />
+          </IconButton>
+          <IconButton title="Remove" onClick={onDelete}>
+            <Trash2 size={12} />
+          </IconButton>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function SettingsPage({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: (t: 'dark' | 'light') => void }) {
   const [autoInstall, setAutoInstall] = useState(true);
   const [notifications, setNotifications] = useState(true);
@@ -3441,6 +4508,8 @@ function SettingsPage({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: 
         description={getUser()?.email ?? 'unknown'}>
         <GhostButton onClick={handleSignOut}>Sign out</GhostButton>
       </SettingRow>
+
+      <ApiKeysSection />
 
       <SectionHeader>Appearance</SectionHeader>
       <SettingRow label="Theme" description="Switch between a warm dark mode and a light paper-style theme.">

@@ -124,6 +124,77 @@ export const deleteInstall = async (installId: string): Promise<void> => {
   }
 };
 
+/* ---------- Run (launch installed app) ---------- */
+
+export type RunStatus = 'starting' | 'running' | 'exited' | 'crashed' | 'stopped';
+
+export type RunResponse = {
+  run_id: string;
+  install_id: string;
+  command: string;
+  pid: number | null;
+  url: string | null;
+  port: number | null;
+  status: RunStatus;
+  started_at: number;
+  finished_at: number | null;
+  exit_code: number | null;
+};
+
+export type RunLogsResponse = {
+  lines: string[];
+};
+
+export type RunStartOptions = {
+  command?: string;       // override the stored run_command
+  wait_for_url?: number;  // override the 30s default URL-detection window
+};
+
+export const startRun = (installId: string, options?: RunStartOptions) =>
+  postJson<RunResponse>(`${API_BASE}/api/v1/install/${installId}/run`, options ?? {});
+
+export const fetchRunState = (installId: string) =>
+  getJson<RunResponse>(`${API_BASE}/api/v1/install/${installId}/run`);
+
+export const stopRun = (installId: string) =>
+  postJson<RunResponse>(`${API_BASE}/api/v1/install/${installId}/run/stop`);
+
+export const fetchRunLogs = (installId: string, limit = 200) =>
+  getJson<RunLogsResponse>(`${API_BASE}/api/v1/install/${installId}/run/logs?limit=${limit}`);
+
+/* ---------- Secrets (API Keys vault) ---------- */
+
+export type SecretEntry = {
+  name: string;
+  masked_value: string;
+  length: number;
+};
+
+export type SecretsListResponse = {
+  secrets: SecretEntry[];
+};
+
+export type SecretsCheckResponse = {
+  status: Record<string, boolean>;
+};
+
+export const listSecrets = () =>
+  getJson<SecretsListResponse>(`${API_BASE}/api/v1/secrets`);
+
+export const addSecret = (name: string, value: string) =>
+  postJson<{ ok: boolean }>(`${API_BASE}/api/v1/secrets`, { name, value });
+
+export const deleteSecret = async (name: string): Promise<void> => {
+  const res = await authFetch(`${API_BASE}/api/v1/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+};
+
+export const revealSecret = (name: string) =>
+  getJson<{ name: string; value: string }>(`${API_BASE}/api/v1/secrets/${encodeURIComponent(name)}/reveal`);
+
+export const checkSecrets = (names: string[]) =>
+  postJson<SecretsCheckResponse>(`${API_BASE}/api/v1/secrets/check`, { names });
+
 /* ---------- Search ---------- */
 
 export type SearchResolvedAs = 'search' | 'url' | 'slug';
