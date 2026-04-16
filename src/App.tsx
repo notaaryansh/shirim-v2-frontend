@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, Square, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle, Check } from 'lucide-react';
+import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, Square, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle, Check, Workflow as WorkflowIcon } from 'lucide-react';
 import {
   fetchHome, fetchDiscover, fetchRepoDetail,
   kickInstall, fetchInstallProgress, cancelInstall, deleteInstall,
@@ -19,6 +19,7 @@ import {
 import {
   isAuthenticated, setSession, setUser, signOut, sendOtp, verifyOtp, fetchMe, getUser,
 } from './auth';
+import WorkflowsPage from './WorkflowsPage';
 import './index.css';
 
 /* ------------------------- README DATA FETCHER -------------------------
@@ -167,10 +168,11 @@ async function fetchReadmeData(ownerRepo: string): Promise<ReadmeData | null> {
 
 /* Mock project data removed — projects now come from the backend via fetchHome / fetchDiscover. */
 
-const VIEW_CATEGORIES: Record<'Home' | 'Discover' | 'Installed' | 'Settings', string[]> = {
+const VIEW_CATEGORIES: Record<'Home' | 'Discover' | 'Installed' | 'Workflows' | 'Settings', string[]> = {
   Home: ['Popular', 'Recently Run'],
   Discover: ['Productivity', 'AI', 'Trending'],
   Installed: [],
+  Workflows: [],
   Settings: [],
 };
 
@@ -363,7 +365,7 @@ function isRunningInstall(a: ActiveInstall): boolean {
 }
 
 export default function App() {
-  const [activeView, setActiveView] = useState<'Home' | 'Discover' | 'Installed' | 'Settings'>('Home');
+  const [activeView, setActiveView] = useState<'Home' | 'Discover' | 'Installed' | 'Workflows' | 'Settings'>('Home');
   const [selectedProject, setSelectedProject] = useState<Repository | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1078,6 +1080,12 @@ export default function App() {
             onClick={() => { setActiveView('Installed'); setSelectedProject(null); }}
             busy={anyInstallRunning}
           />
+          <NavItem
+            icon={<WorkflowIcon size={18} />}
+            label="Workflows"
+            active={activeView === 'Workflows'}
+            onClick={() => { setActiveView('Workflows'); setSelectedProject(null); }}
+          />
         </div>
 
         {/* Bottom Nav */}
@@ -1210,6 +1218,7 @@ export default function App() {
               onSelectRepo={(repo) => setSelectedProject(repo)}
             />
           )}
+          {activeView === 'Workflows' && <WorkflowsPage />}
           {activeView === 'Settings' && <SettingsPage theme={theme} setTheme={setTheme} />}
           {(activeView === 'Home' || activeView === 'Discover') && dataError && (
             <BackendErrorState message={dataError} onRetry={loadProjects} />
