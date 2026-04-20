@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, Square, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle, Check, Workflow as WorkflowIcon } from 'lucide-react';
+import { Home, Compass, Download, Settings, ChevronLeft, ChevronRight, ChevronDown, Search, Play, Square, RefreshCw, Trash2, FolderOpen, ExternalLink, X, AlertTriangle, Check, Workflow as WorkflowIcon, GraduationCap } from 'lucide-react';
 import {
   fetchHome, fetchDiscover, fetchRepoDetail,
   kickInstall, fetchInstallProgress, cancelInstall, deleteInstall,
@@ -20,6 +20,8 @@ import {
   isAuthenticated, setSession, setUser, signOut, sendOtp, verifyOtp, fetchMe, getUser,
 } from './auth';
 import WorkflowsPage from './WorkflowsPage';
+import TutorialPage from './TutorialPage';
+import HomeOverview from './HomeOverview';
 import './index.css';
 
 /* ------------------------- README DATA FETCHER -------------------------
@@ -167,28 +169,6 @@ async function fetchReadmeData(ownerRepo: string): Promise<ReadmeData | null> {
 }
 
 /* Mock project data removed — projects now come from the backend via fetchHome / fetchDiscover. */
-
-const VIEW_CATEGORIES: Record<'Home' | 'Discover' | 'Installed' | 'Workflows' | 'Settings', string[]> = {
-  Home: ['Popular', 'Recently Run'],
-  Discover: ['Productivity', 'AI', 'Trending'],
-  Installed: [],
-  Workflows: [],
-  Settings: [],
-};
-
-/* ------------------------- HOME: HARDCODED POPULAR PICKS -------------------------
- * Frontend override for Home's Popular row. Bypasses whatever the backend's
- * /api/home returns and shows a curated list instead. Recently Run is left
- * empty on purpose — the section will be hidden when there are no cards.
- */
-
-const HOME_POPULAR: Repository[] = [
-  { id: 8001, name: 'openclaw',  repo: 'openclaw/openclaw',             desc: 'Open-source AI agent.',                                                                     language: 'TypeScript', stars: '300k', summary: null },
-  { id: 8002, name: 'ollama',    repo: 'ollama/ollama',                 desc: 'Get up and running with large language models locally. Llama 3, Mistral, Gemma and more.', language: 'Go',         stars: '89k',  summary: null },
-  { id: 8003, name: 'vscode',    repo: 'microsoft/vscode',              desc: 'Visual Studio Code — free, built on open source, runs everywhere.',                         language: 'TypeScript', stars: '163k', summary: null },
-  { id: 8004, name: 'AutoGPT',   repo: 'Significant-Gravitas/AutoGPT',  desc: 'An experimental open-source attempt to make GPT-4 fully autonomous.',                        language: 'Python',     stars: '172k', summary: null },
-];
-
 
 /* ------------------------- DISCOVER: REPLACE X WITH -------------------------
  * Placeholder data for the Discover tab. Each section is a "Replace {tool}
@@ -365,7 +345,7 @@ function isRunningInstall(a: ActiveInstall): boolean {
 }
 
 export default function App() {
-  const [activeView, setActiveView] = useState<'Home' | 'Discover' | 'Installed' | 'Workflows' | 'Settings'>('Home');
+  const [activeView, setActiveView] = useState<'Home' | 'Discover' | 'Installed' | 'Workflows' | 'Tutorial' | 'Settings'>('Home');
   const [selectedProject, setSelectedProject] = useState<Repository | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -387,10 +367,10 @@ export default function App() {
   const [focusedAppId, setFocusedAppId] = useState<string | null>(null);
   const focusedApp = runningApps.find(a => a.installId === focusedAppId) ?? null;
   const [installedRepos, setInstalledRepos] = useState<InstalledEntry[]>(() => getInstalls());
-  const [projectsByCategory, setProjectsByCategory] = useState<Record<string, Repository[]>>({
-    Popular: HOME_POPULAR,
-    'Recently Run': [],
-  });
+  // Home's Popular / Discover sections are sourced from hardcoded constants
+  // (HOME_POPULAR / REPLACEMENTS). We still hit the backend to surface any
+  // dataError / dataLoading state, but nothing actually consumes the response
+  // anymore — kept to preserve the existing UX around backend availability.
   const [dataLoading, setDataLoading] = useState(true);
   const [dataError, setDataError] = useState<string | null>(null);
   const [authed, setAuthed] = useState<boolean>(isAuthenticated());
@@ -412,15 +392,9 @@ export default function App() {
     setDataLoading(true);
     setDataError(null);
     try {
-      const [home, discover] = await Promise.all([fetchHome(), fetchDiscover()]);
-      const merged: Record<string, Repository[]> = {};
-      for (const block of [...home.categories, ...discover.categories]) {
-        merged[block.name] = block.repos;
-      }
-      // Override Home sections — backend data for Discover categories is preserved.
-      merged['Popular'] = HOME_POPULAR;
-      merged['Recently Run'] = [];
-      setProjectsByCategory(merged);
+      // Response is intentionally unused — hardcoded constants drive Home/Discover.
+      // We still run the fetches to detect backend availability for the error banner.
+      await Promise.all([fetchHome(), fetchDiscover()]);
     } catch (err) {
       setDataError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
@@ -1086,6 +1060,12 @@ export default function App() {
             active={activeView === 'Workflows'}
             onClick={() => { setActiveView('Workflows'); setSelectedProject(null); }}
           />
+          <NavItem
+            icon={<GraduationCap size={18} />}
+            label="Tutorial"
+            active={activeView === 'Tutorial'}
+            onClick={() => { setActiveView('Tutorial'); setSelectedProject(null); }}
+          />
         </div>
 
         {/* Bottom Nav */}
@@ -1219,6 +1199,7 @@ export default function App() {
             />
           )}
           {activeView === 'Workflows' && <WorkflowsPage />}
+          {activeView === 'Tutorial' && <TutorialPage />}
           {activeView === 'Settings' && <SettingsPage theme={theme} setTheme={setTheme} />}
           {(activeView === 'Home' || activeView === 'Discover') && dataError && (
             <BackendErrorState message={dataError} onRetry={loadProjects} />
@@ -1235,106 +1216,10 @@ export default function App() {
             />
           )}
           {activeView === 'Home' && !dataError && !activeSearch && (
-            <div style={{ padding: '24px 40px 48px' }}>
-              {VIEW_CATEGORIES.Home
-                .filter(cat => (projectsByCategory[cat] ?? []).length > 0)
-                .map(cat => (
-                  <div
-                    key={cat}
-                    className="fade-in"
-                    style={{
-                      backgroundColor: 'var(--surface)',
-                      border: '1px solid var(--border)',
-                      borderRadius: '12px',
-                      padding: '28px',
-                      marginBottom: '14px'
-                    }}>
-                    {/* Section title — same weight as ReplacementCard on Discover */}
-                    <h2 style={{
-                      fontSize: '22px',
-                      fontWeight: 500,
-                      color: 'var(--text-primary)',
-                      letterSpacing: '-0.01em',
-                      marginBottom: '22px'
-                    }}>
-                      {cat}
-                    </h2>
-
-                    {/* Horizontally scrollable 2-row grid.
-                        With 4 repos and 2 rows, you get a clean 2×2 layout with
-                        no scroll. Add more repos → the grid grows columns and
-                        horizontal scroll kicks in. Vertical padding gives cards
-                        room to lift on hover without being clipped. */}
-                    <div
-                      className="hide-scrollbar"
-                      style={{
-                        overflowX: 'auto',
-                        overflowY: 'hidden',
-                        containerType: 'inline-size',
-                        paddingTop: '10px',
-                        paddingBottom: '10px'
-                      } as CSSProperties}>
-                      <div style={{
-                        display: 'grid',
-                        gridTemplateRows: 'repeat(2, 220px)',
-                        gridAutoFlow: 'column',
-                        gridAutoColumns: 'calc((100cqw - 16px) / 2)',
-                        gap: '16px'
-                      }}>
-                        {(projectsByCategory[cat] ?? []).map(proj => (
-                          <ProjectCard
-                            key={proj.id}
-                            project={proj}
-                            onClick={() => setSelectedProject(proj)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-
-              {/* Discover more — right-aligned call-to-action below the Popular card.
-                  Clickable → jumps to the Discover tab. */}
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '10px' }}>
-                <div
-                  onClick={() => setActiveView('Discover')}
-                  onMouseEnter={(e) => {
-                    const el = e.currentTarget.firstChild as HTMLElement;
-                    el.style.color = 'var(--accent)';
-                    el.style.textDecorationColor = 'var(--accent)';
-                  }}
-                  onMouseLeave={(e) => {
-                    const el = e.currentTarget.firstChild as HTMLElement;
-                    el.style.color = 'var(--text-primary)';
-                    el.style.textDecorationColor = 'transparent';
-                  }}
-                  style={{
-                    cursor: 'pointer',
-                    textAlign: 'left'
-                  }}>
-                  <div style={{
-                    fontSize: '15px',
-                    fontWeight: 500,
-                    color: 'var(--text-primary)',
-                    letterSpacing: '-0.01em',
-                    marginBottom: '4px',
-                    textDecoration: 'underline',
-                    textDecorationColor: 'transparent',
-                    textDecorationThickness: '1.5px',
-                    textUnderlineOffset: '4px',
-                    transition: 'color 240ms ease-out, text-decoration-color 240ms ease-out'
-                  }}>
-                    Discover more →
-                  </div>
-                  <div style={{
-                    fontSize: '12px',
-                    color: 'var(--text-muted)'
-                  }}>
-                    Find open source alternatives to paid apps.
-                  </div>
-                </div>
-              </div>
-            </div>
+            <HomeOverview
+              onSelectProject={(repo) => setSelectedProject(repo)}
+              onNavDiscover={() => setActiveView('Discover')}
+            />
           )}
 
           {activeView === 'Discover' && !dataError && !activeSearch && (
