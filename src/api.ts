@@ -195,6 +195,54 @@ export const revealSecret = (name: string) =>
 export const checkSecrets = (names: string[]) =>
   postJson<SecretsCheckResponse>(`${API_BASE}/api/v1/secrets/check`, { names });
 
+/* ---------- Edit with AI ---------- */
+
+export type EditTurn = {
+  turn_id: number;
+  user_message: string;
+  status: 'done' | 'error';
+  files_changed: string[];
+  tsc_ok: boolean | null;
+  tsc_errors: string | null;
+  agent_reply: string | null;
+  duration_ms: number;
+};
+
+export type EditResponse = {
+  session_id: string;
+  turn: EditTurn;
+};
+
+export type EditSession = {
+  session_id: string;
+  install_id: string;
+  app_context: {
+    project_type: string;
+    framework: string;
+    styling: string;
+    components_count: number;
+  };
+  turn_count: number;
+  turns: EditTurn[];
+};
+
+export type EditUndoResponse = {
+  ok: boolean;
+  restored_to_before_turn: number;
+};
+
+export const sendEdit = (installId: string, message: string, sessionId?: string | null) =>
+  postJson<EditResponse>(`${API_BASE}/api/v1/install/${installId}/edit`, {
+    message,
+    ...(sessionId ? { session_id: sessionId } : {}),
+  });
+
+export const getEditSession = (installId: string) =>
+  getJson<EditSession>(`${API_BASE}/api/v1/install/${installId}/edit`);
+
+export const undoEditTurn = (installId: string, turnId: number) =>
+  postJson<EditUndoResponse>(`${API_BASE}/api/v1/install/${installId}/edit/undo`, { turn_id: turnId });
+
 /* ---------- Search ---------- */
 
 export type SearchResolvedAs = 'search' | 'url' | 'slug';
