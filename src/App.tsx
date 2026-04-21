@@ -2445,7 +2445,6 @@ function AppViewer({
         {aiPanelOpen && (
           <AiEditPanel
             installId={app.installId}
-            appName={app.name}
             onClose={() => setAiPanelOpen(false)}
           />
         )}
@@ -2459,9 +2458,8 @@ function AppViewer({
 
 /* ------------------------- AI EDIT PANEL (CHAT SIDEBAR) ------------------------- */
 
-function AiEditPanel({ installId, appName, onClose }: {
+function AiEditPanel({ installId, onClose }: {
   installId: string;
-  appName: string;
   onClose: () => void;
 }) {
   const [turns, setTurns] = useState<EditTurn[]>([]);
@@ -2669,42 +2667,37 @@ function AiEditPanel({ installId, appName, onClose }: {
           </div>
         </div>
       )}
-      {/* Header */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        padding: '14px 18px',
-        borderBottom: '1px solid var(--border)',
-        backgroundColor: 'var(--surface)'
-      }}>
-        <div>
-          <div style={{ fontSize: '14px', fontWeight: 500, color: 'var(--text-primary)' }}>
-            Edit with AI
-          </div>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-            {appName}
-          </div>
-        </div>
-        <button onClick={onClose} style={{
-          width: '26px', height: '26px',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          borderRadius: '5px', border: '1px solid var(--border)',
-          backgroundColor: 'transparent', color: 'var(--text-muted)',
-          cursor: 'pointer', padding: 0
-        }}>
-          <X size={13} />
-        </button>
-      </div>
+      {/* Floating close button (no header) */}
+      <button onClick={onClose} style={{
+        position: 'absolute',
+        top: '10px',
+        right: '10px',
+        zIndex: 5,
+        width: '24px', height: '24px',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        borderRadius: '5px',
+        border: '1px solid var(--border)',
+        backgroundColor: 'var(--surface)',
+        color: 'var(--text-muted)',
+        cursor: 'pointer',
+        padding: 0,
+        opacity: 0.6,
+        transition: 'opacity 120ms ease-out'
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.6'; }}>
+        <X size={12} />
+      </button>
 
       {/* Messages area */}
       <div className="hide-scrollbar" style={{
         flex: 1,
         overflowY: 'auto',
         padding: '18px',
+        paddingTop: '40px',
         display: 'flex',
         flexDirection: 'column',
-        gap: '14px'
+        gap: '18px'
       }}>
         {/* Empty state */}
         {!hasMessages && (
@@ -2715,27 +2708,31 @@ function AiEditPanel({ installId, appName, onClose }: {
             alignItems: 'center',
             justifyContent: 'center',
             textAlign: 'center',
-            gap: '14px',
-            padding: '40px 20px',
+            gap: '16px',
+            padding: '40px 16px',
             color: 'var(--text-muted)'
           }}>
-            <div style={{ fontSize: '22px' }}>✦</div>
-            <div style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
-              Edit with AI
+            <div style={{
+              fontSize: '16px',
+              color: 'var(--text-secondary)',
+              fontWeight: 500,
+              letterSpacing: '-0.01em'
+            }}>
+              What would you like to change?
             </div>
             <div style={{ fontSize: '12px', lineHeight: 1.6 }}>
-              Describe what you want to change,{'\n'}and I'll update the project for you.
+              Describe what you see on screen and what you'd like different.
             </div>
             <div style={{
               display: 'flex', flexDirection: 'column', gap: '8px',
-              marginTop: '10px', width: '100%', maxWidth: '240px'
+              marginTop: '8px', width: '100%', maxWidth: '240px'
             }}>
               {['Make the text bigger', 'Change the background to dark blue', 'Add a fade transition between scenes'].map((ex, i) => (
                 <button
                   key={i}
                   onClick={() => { setInput(ex); }}
                   style={{
-                    padding: '8px 14px',
+                    padding: '10px 14px',
                     borderRadius: '8px',
                     border: '1px solid var(--border)',
                     backgroundColor: 'var(--surface-2)',
@@ -2744,8 +2741,10 @@ function AiEditPanel({ installId, appName, onClose }: {
                     fontFamily: 'var(--font-pixel)',
                     cursor: 'pointer',
                     textAlign: 'left',
-                    transition: 'border-color 120ms ease-out'
-                  }}>
+                    transition: 'border-color 120ms ease-out, background-color 120ms ease-out'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--border-active)'; e.currentTarget.style.backgroundColor = 'var(--card-hover)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.backgroundColor = 'var(--surface-2)'; }}>
                   "{ex}"
                 </button>
               ))}
@@ -2875,115 +2874,95 @@ function AiChatTurn({
   isLoading: boolean;
   onUndo: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const filesCount = turn.files_changed.length;
+  const durationLabel = turn.duration_ms > 0
+    ? `${(turn.duration_ms / 1000).toFixed(1)}s`
+    : null;
 
   return (
-    <>
-      {/* User message bubble — right-aligned */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <div style={{
-          maxWidth: '88%',
-          padding: '11px 15px',
-          borderRadius: '12px 12px 4px 12px',
-          backgroundColor: 'var(--accent)',
-          color: 'var(--on-accent)',
-          fontSize: '13px',
-          lineHeight: 1.55,
-          wordBreak: 'break-word'
-        }}>
-          {turn.user_message}
-        </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      {/* User message — quiet, right-aligned, no bubble */}
+      <div style={{
+        textAlign: 'right',
+        fontSize: '14px',
+        color: 'var(--text-secondary)',
+        lineHeight: 1.55,
+        wordBreak: 'break-word',
+        paddingLeft: '20%'
+      }}>
+        {turn.user_message}
       </div>
 
-      {/* AI response bubble — left-aligned */}
-      <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-        <div style={{
-          maxWidth: '88%',
-          padding: '11px 15px',
-          borderRadius: '12px 12px 12px 4px',
-          backgroundColor: 'var(--surface-2)',
-          color: 'var(--text-primary)',
-          fontSize: '13px',
-          lineHeight: 1.55,
-          wordBreak: 'break-word'
-        }}>
-          {/* Typing indicator while waiting for response */}
-          {isLoading && !turn.agent_reply && (
-            <div style={{ display: 'flex', gap: '5px', alignItems: 'center', padding: '4px 0' }}>
-              {[0, 1, 2].map(i => (
-                <div
-                  key={i}
-                  className="pulse-dot"
-                  style={{
-                    width: '6px',
-                    height: '6px',
-                    borderRadius: '50%',
-                    backgroundColor: 'var(--text-muted)',
-                    animationDelay: `${i * 200}ms`
-                  }}
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Agent reply text */}
-          {turn.agent_reply && (
-            <div>{turn.agent_reply}</div>
-          )}
-
-          {/* "What changed" expandable — NO filenames, just count */}
-          {turn.status === 'done' && filesCount > 0 && (
-            <div style={{ marginTop: '10px' }}>
-              <button
-                onClick={() => setExpanded(!expanded)}
+      {/* AI response — card treatment */}
+      <div style={{
+        backgroundColor: 'var(--surface-2)',
+        border: '1px solid var(--border)',
+        borderRadius: '10px',
+        padding: '14px 16px',
+        fontSize: '13px',
+        lineHeight: 1.6,
+        color: 'var(--text-primary)',
+        wordBreak: 'break-word'
+      }}>
+        {/* Typing indicator */}
+        {isLoading && !turn.agent_reply && (
+          <div style={{ display: 'flex', gap: '5px', alignItems: 'center', padding: '4px 0' }}>
+            {[0, 1, 2].map(i => (
+              <div
+                key={i}
+                className="pulse-dot"
                 style={{
-                  display: 'flex', alignItems: 'center', gap: '6px',
-                  background: 'none', border: 'none', padding: 0,
-                  color: 'var(--text-muted)', fontSize: '11px',
-                  cursor: 'pointer', fontFamily: 'var(--font-pixel)'
-                }}>
-                {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                {filesCount} {filesCount === 1 ? 'file' : 'files'} updated
-              </button>
+                  width: '6px',
+                  height: '6px',
+                  borderRadius: '50%',
+                  backgroundColor: 'var(--text-muted)',
+                  animationDelay: `${i * 200}ms`
+                }}
+              />
+            ))}
+          </div>
+        )}
 
-              {expanded && turn.duration_ms > 0 && (
-                <div style={{
-                  marginTop: '6px',
-                  fontSize: '11px',
-                  color: 'var(--text-muted)',
-                  paddingLeft: '18px'
-                }}>
-                  Completed in {(turn.duration_ms / 1000).toFixed(1)}s
-                </div>
-              )}
-            </div>
-          )}
+        {/* Agent reply */}
+        {turn.agent_reply && (
+          <div>{turn.agent_reply}</div>
+        )}
 
-          {/* TypeScript warning — friendly, no raw errors */}
-          {turn.tsc_ok === false && (
-            <div style={{
-              marginTop: '8px',
-              display: 'flex', alignItems: 'center', gap: '6px',
-              fontSize: '11px',
-              color: 'var(--building)',
-              padding: '6px 10px',
-              backgroundColor: 'var(--surface)',
-              borderRadius: '6px',
-              border: '1px solid var(--border)'
-            }}>
-              <AlertTriangle size={11} />
-              Some type issues detected — the change might still work
-            </div>
-          )}
-
-          {/* Undo button */}
-          {turn.status === 'done' && turn.agent_reply && (
+        {/* Inline metadata line — always visible, not expandable */}
+        {turn.status === 'done' && turn.agent_reply && (
+          <div style={{
+            marginTop: '10px',
+            paddingTop: '10px',
+            borderTop: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-pixel)',
+            flexWrap: 'wrap'
+          }}>
+            {filesCount > 0 && (
+              <span>{filesCount} {filesCount === 1 ? 'file' : 'files'} updated</span>
+            )}
+            {filesCount > 0 && durationLabel && (
+              <span style={{ color: 'var(--border-active)' }}>·</span>
+            )}
+            {durationLabel && (
+              <span>{durationLabel}</span>
+            )}
+            {turn.tsc_ok === false && (
+              <>
+                <span style={{ color: 'var(--border-active)' }}>·</span>
+                <span style={{ color: 'var(--building)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <AlertTriangle size={10} /> type issues
+                </span>
+              </>
+            )}
+            <span style={{ color: 'var(--border-active)' }}>·</span>
             <button
               onClick={onUndo}
               style={{
-                marginTop: '8px',
-                display: 'flex', alignItems: 'center', gap: '5px',
                 background: 'none', border: 'none', padding: 0,
                 color: 'var(--text-muted)', fontSize: '11px',
                 cursor: 'pointer', fontFamily: 'var(--font-pixel)',
@@ -2994,24 +2973,24 @@ function AiChatTurn({
               }}
               onMouseEnter={(e) => { e.currentTarget.style.textDecorationColor = 'var(--text-muted)'; }}
               onMouseLeave={(e) => { e.currentTarget.style.textDecorationColor = 'transparent'; }}>
-              Undo this change
+              ↩ Undo
             </button>
-          )}
+          </div>
+        )}
 
-          {/* Error state */}
-          {turn.status === 'error' && turn.agent_reply && (
-            <div style={{
-              marginTop: '6px',
-              display: 'flex', alignItems: 'center', gap: '6px',
-              fontSize: '11px', color: 'var(--error)'
-            }}>
-              <AlertTriangle size={12} />
-              Failed
-            </div>
-          )}
-        </div>
+        {/* Error state */}
+        {turn.status === 'error' && turn.agent_reply && (
+          <div style={{
+            marginTop: '8px',
+            display: 'flex', alignItems: 'center', gap: '6px',
+            fontSize: '11px', color: 'var(--error)'
+          }}>
+            <AlertTriangle size={12} />
+            Failed
+          </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }
 
