@@ -371,3 +371,21 @@ export async function stopRun(runId: string, grace = 5): Promise<RunHandle | und
 
   return handle;
 }
+
+/**
+ * Kill ALL active runs. Called on app quit to ensure no orphaned processes
+ * keep ports occupied after the Electron app closes.
+ */
+export function stopAllRuns(): void {
+  for (const [_runId, handle] of _runs) {
+    if (handle.status === 'starting' || handle.status === 'running') {
+      handle.stopFlag = true;
+      const proc = handle.process;
+      if (proc && proc.pid != null && proc.exitCode == null) {
+        try { process.kill(-proc.pid, 'SIGKILL'); } catch { /* already dead */ }
+      }
+      handle.status = 'stopped';
+      handle.finishedAt = Date.now() / 1000;
+    }
+  }
+}

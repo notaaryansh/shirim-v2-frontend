@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session } from 'electron';
+import { app, BrowserWindow, session, ipcMain, screen } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -63,6 +63,33 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 }
+
+// Resize the window by a delta — used by the AI edit panel to grow/shrink
+// the window so the iframe keeps its original dimensions.
+// Shifts the window left if needed so the new size fits on screen.
+ipcMain.on('resize-window-by', (event, { deltaWidth }) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  const [w, h] = win.getSize();
+  const [x, y] = win.getPosition();
+  const { width: screenWidth } = screen.getPrimaryDisplay().workAreaSize;
+
+  const newWidth = w + deltaWidth;
+
+  if (deltaWidth > 0) {
+    // Growing: shift left if needed so the window fits on screen
+    const overflow = (x + newWidth) - screenWidth;
+    if (overflow > 0) {
+      const newX = Math.max(0, x - overflow);
+      win.setBounds({ x: newX, y, width: Math.min(newWidth, screenWidth), height: h }, true);
+    } else {
+      win.setSize(newWidth, h, true);
+    }
+  } else {
+    // Shrinking: just reduce width, keep position
+    win.setSize(Math.max(800, newWidth), h, true);
+  }
+});
 
 app.whenReady().then(() => {
   allowLocalhostIframes();

@@ -2418,16 +2418,16 @@ function AppViewer({
         </button>
       </div>
 
-      {/* Body: iframe + optional AI panel */}
+      {/* Body: iframe + AI panel side by side */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <iframe
           src={app.url}
           title={`${app.name} — ${app.url}`}
           style={{
-            flex: aiPanelOpen ? '1 1 72%' : '1 1 100%',
+            flex: 1,
+            minWidth: 0,
             border: 'none',
-            backgroundColor: '#ffffff',
-            transition: 'flex 200ms ease-out'
+            backgroundColor: '#ffffff'
           }}
         />
         {aiPanelOpen && (
@@ -2612,14 +2612,12 @@ function AiEditPanel({ installId, onClose }: {
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       style={{
-        width: '28%',
-        minWidth: '280px',
-        maxWidth: '380px',
+        width: '340px',
+        flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
         borderLeft: '1px solid var(--border)',
         backgroundColor: 'var(--bg)',
-        flexShrink: 0,
         position: 'relative'
       }}>
 
@@ -2682,7 +2680,6 @@ function AiEditPanel({ installId, onClose }: {
         flex: 1,
         overflowY: 'auto',
         padding: '18px',
-        paddingTop: '40px',
         display: 'flex',
         flexDirection: 'column',
         gap: '18px'
@@ -2776,7 +2773,7 @@ function AiEditPanel({ installId, onClose }: {
       }}>
         <div style={{
           display: 'flex',
-          alignItems: 'flex-end',
+          alignItems: 'center',
           gap: '10px',
           backgroundColor: 'var(--surface-2)',
           border: `1px solid ${inputFocused ? 'var(--accent)' : 'var(--border)'}`,

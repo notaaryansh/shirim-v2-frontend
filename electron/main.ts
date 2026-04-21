@@ -2,6 +2,7 @@ import { app, BrowserWindow, session } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { registerIpcHandlers } from './ipc-handlers.js';
+import { stopAllRuns } from './launcher.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,3 +84,12 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// Kill all spawned processes when the app quits so ports aren't left occupied.
+app.on('will-quit', () => {
+  stopAllRuns();
+});
+
+// Also handle abrupt exits (SIGTERM, SIGINT).
+process.on('SIGTERM', () => { stopAllRuns(); process.exit(0); });
+process.on('SIGINT', () => { stopAllRuns(); process.exit(0); });
