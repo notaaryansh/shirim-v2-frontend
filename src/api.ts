@@ -105,24 +105,21 @@ export type InstallCancelResponse = {
   already_terminal?: boolean;
 };
 
-export const kickInstall = (ownerRepo: string) =>
-  postJson<InstallStartResponse>(`${API_BASE}/api/v1/install/${ownerRepo}`);
-
-export const fetchInstallProgress = (installId: string) =>
-  getJson<InstallProgress>(`${API_BASE}/api/v1/install/${installId}/progress`);
-
-/** POST /cancel — stops the task, KEEPS the workdir on disk for debugging. */
-export const cancelInstall = (installId: string) =>
-  postJson<InstallCancelResponse>(`${API_BASE}/api/v1/install/${installId}/cancel`);
-
-/** DELETE — stops the task AND wipes the workdir. Use when the user dismisses a
- *  failed / cancelled install and has no intent to retry from the same install_id. */
-export const deleteInstall = async (installId: string): Promise<void> => {
-  const res = await authFetch(`${API_BASE}/api/v1/install/${installId}`, { method: 'DELETE' });
-  if (!res.ok && res.status !== 404) {
-    throw new Error(`${res.status} ${res.statusText} @ /api/v1/install/${installId}`);
-  }
+export const kickInstall = (ownerRepo: string): Promise<InstallStartResponse> => {
+  const [owner, repo] = ownerRepo.split('/');
+  return window.shirim.install.start(owner, repo);
 };
+
+export const fetchInstallProgress = (installId: string): Promise<InstallProgress> =>
+  window.shirim.install.getProgress(installId);
+
+/** Cancel — stops the task, KEEPS the workdir on disk for debugging. */
+export const cancelInstall = (installId: string): Promise<InstallCancelResponse> =>
+  window.shirim.install.cancel(installId);
+
+/** Delete — stops the task AND wipes the workdir. */
+export const deleteInstall = (installId: string): Promise<void> =>
+  window.shirim.install.delete(installId);
 
 /* ---------- Run (launch installed app) ---------- */
 
@@ -150,17 +147,17 @@ export type RunStartOptions = {
   wait_for_url?: number;  // override the 30s default URL-detection window
 };
 
-export const startRun = (installId: string, options?: RunStartOptions) =>
-  postJson<RunResponse>(`${API_BASE}/api/v1/install/${installId}/run`, options ?? {});
+export const startRun = (installId: string, options?: RunStartOptions): Promise<RunResponse> =>
+  window.shirim.run.start(installId, options);
 
-export const fetchRunState = (installId: string) =>
-  getJson<RunResponse>(`${API_BASE}/api/v1/install/${installId}/run`);
+export const fetchRunState = (installId: string): Promise<RunResponse> =>
+  window.shirim.run.getState(installId);
 
-export const stopRun = (installId: string) =>
-  postJson<RunResponse>(`${API_BASE}/api/v1/install/${installId}/run/stop`);
+export const stopRun = (installId: string): Promise<RunResponse> =>
+  window.shirim.run.stop(installId);
 
-export const fetchRunLogs = (installId: string, limit = 200) =>
-  getJson<RunLogsResponse>(`${API_BASE}/api/v1/install/${installId}/run/logs?limit=${limit}`);
+export const fetchRunLogs = (installId: string, limit = 200): Promise<RunLogsResponse> =>
+  window.shirim.run.getLogs(installId, limit);
 
 /* ---------- Secrets (API Keys vault) ---------- */
 
@@ -178,22 +175,20 @@ export type SecretsCheckResponse = {
   status: Record<string, boolean>;
 };
 
-export const listSecrets = () =>
-  getJson<SecretsListResponse>(`${API_BASE}/api/v1/secrets`);
+export const listSecrets = (): Promise<SecretsListResponse> =>
+  window.shirim.secrets.list();
 
-export const addSecret = (name: string, value: string) =>
-  postJson<{ ok: boolean }>(`${API_BASE}/api/v1/secrets`, { name, value });
+export const addSecret = (name: string, value: string): Promise<{ ok: boolean }> =>
+  window.shirim.secrets.add(name, value);
 
-export const deleteSecret = async (name: string): Promise<void> => {
-  const res = await authFetch(`${API_BASE}/api/v1/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-};
+export const deleteSecret = (name: string): Promise<void> =>
+  window.shirim.secrets.delete(name);
 
-export const revealSecret = (name: string) =>
-  getJson<{ name: string; value: string }>(`${API_BASE}/api/v1/secrets/${encodeURIComponent(name)}/reveal`);
+export const revealSecret = (name: string): Promise<{ name: string; value: string }> =>
+  window.shirim.secrets.reveal(name);
 
-export const checkSecrets = (names: string[]) =>
-  postJson<SecretsCheckResponse>(`${API_BASE}/api/v1/secrets/check`, { names });
+export const checkSecrets = (names: string[]): Promise<SecretsCheckResponse> =>
+  window.shirim.secrets.check(names);
 
 /* ---------- Edit with AI ---------- */
 
@@ -231,17 +226,14 @@ export type EditUndoResponse = {
   restored_to_before_turn: number;
 };
 
-export const sendEdit = (installId: string, message: string, sessionId?: string | null) =>
-  postJson<EditResponse>(`${API_BASE}/api/v1/install/${installId}/edit`, {
-    message,
-    ...(sessionId ? { session_id: sessionId } : {}),
-  });
+export const sendEdit = (installId: string, message: string, sessionId?: string | null): Promise<EditResponse> =>
+  window.shirim.edit.send(installId, message, sessionId);
 
-export const getEditSession = (installId: string) =>
-  getJson<EditSession>(`${API_BASE}/api/v1/install/${installId}/edit`);
+export const getEditSession = (installId: string): Promise<EditSession> =>
+  window.shirim.edit.getSession(installId);
 
-export const undoEditTurn = (installId: string, turnId: number) =>
-  postJson<EditUndoResponse>(`${API_BASE}/api/v1/install/${installId}/edit/undo`, { turn_id: turnId });
+export const undoEditTurn = (installId: string, turnId: number): Promise<EditUndoResponse> =>
+  window.shirim.edit.undo(installId, turnId);
 
 /* ---------- Search ---------- */
 

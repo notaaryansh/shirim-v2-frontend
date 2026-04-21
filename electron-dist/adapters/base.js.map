@@ -1,0 +1,1 @@
+{"version":3,"file":"base.js","sourceRoot":"","sources":["../../electron/adapters/base.ts"],"names":[],"mappings":"AAsCA,MAAM,UAAU,eAAe;IAC7B,OAAO;QACL,YAAY,EAAE,EAAE;QAChB,QAAQ,EAAE,EAAE;QACZ,eAAe,EAAE,EAAE;QACnB,oBAAoB,EAAE,EAAE;QACxB,WAAW,EAAE,SAAS;QACtB,MAAM,EAAE,EAAE;KACX,CAAC;AACJ,CAAC"}

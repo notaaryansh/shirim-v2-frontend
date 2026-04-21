@@ -259,34 +259,22 @@ type RunErrorState = {
   logs: string[];
 };
 
-/** Compute the disk size of an install directory using `du -sh` via Node's
- *  child_process. Works on macOS/Linux. Returns human-readable size like "124MB".
+/** Compute the disk size of an install directory via the Electron IPC bridge.
+ *  Works on macOS/Linux. Returns human-readable size like "124MB".
  *  Results are cached in memory so tab-switching doesn't cause a brief "—" flash. */
 const _sizeCache = new Map<string, string>();
 
-function computeInstallSize(installId: string): Promise<string | null> {
+async function computeInstallSize(installId: string): Promise<string | null> {
   const cached = _sizeCache.get(installId);
-  if (cached) return Promise.resolve(cached);
+  if (cached) return cached;
 
-  return new Promise(resolve => {
-    try {
-      const req = (window as any).require;
-      if (!req) { resolve(null); return; }
-      const { exec } = req('child_process');
-      const os = req('os');
-      const path = req('path');
-      const dir = path.join(os.homedir(), '.shirim', 'installs', installId);
-      exec(`du -sh "${dir}" 2>/dev/null`, { encoding: 'utf8' }, (err: any, stdout: string) => {
-        if (err || !stdout) { resolve(null); return; }
-        const raw = stdout.split('\t')[0].trim();
-        const size = raw.replace(/([KMGT])$/i, '$1B');
-        _sizeCache.set(installId, size);
-        resolve(size);
-      });
-    } catch {
-      resolve(null);
-    }
-  });
+  try {
+    const size = await window.shirim.install.getSize(installId);
+    if (size) _sizeCache.set(installId, size);
+    return size;
+  } catch {
+    return null;
+  }
 }
 
 function getCachedSize(installId: string): string | null {
