@@ -6,6 +6,8 @@ import {
   searchRepos,
   startRun, fetchRunState, stopRun, fetchRunLogs,
   listSecrets, addSecret, deleteSecret, revealSecret,
+  sendEdit, getEditSession, undoEditTurn,
+  type EditTurn,
   type Repository, type RepoDetail, type InstallProgress, type InstallStep, type StepStatus,
   type RunResponse, type RunStatus, type SecretEntry,
 } from './api';
@@ -2286,6 +2288,7 @@ function AppViewer({
   onHide: () => void;
 }) {
   const [stopping, setStopping] = useState(false);
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
 
   const handleStop = async () => {
     setStopping(true);
@@ -2357,6 +2360,24 @@ function AppViewer({
           </span>
         </div>
 
+        {/* Edit with AI toggle */}
+        <button
+          onClick={() => setAiPanelOpen(!aiPanelOpen)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '6px',
+            background: aiPanelOpen ? 'var(--accent-glow)' : 'transparent',
+            border: `1px solid ${aiPanelOpen ? 'var(--accent)' : 'var(--border)'}`,
+            color: aiPanelOpen ? 'var(--accent)' : 'var(--text-secondary)',
+            padding: '6px 12px',
+            borderRadius: '6px',
+            fontFamily: 'var(--font-pixel)',
+            fontSize: '12px',
+            cursor: 'pointer',
+            transition: 'all 120ms ease-out'
+          }}>
+          ✦ Edit with AI
+        </button>
+
         {/* Open externally */}
         <button
           onClick={() => openExternal(app.url)}
@@ -2409,23 +2430,591 @@ function AppViewer({
         </button>
       </div>
 
-      {/* Iframe — the running app */}
-      <iframe
-        src={app.url}
-        title={`${app.name} — ${app.url}`}
-        style={{
-          flex: 1,
-          width: '100%',
-          border: 'none',
-          backgroundColor: '#ffffff'
-        }}
-      />
+      {/* Body: iframe + optional AI panel */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        <iframe
+          src={app.url}
+          title={`${app.name} — ${app.url}`}
+          style={{
+            flex: aiPanelOpen ? '1 1 72%' : '1 1 100%',
+            border: 'none',
+            backgroundColor: '#ffffff',
+            transition: 'flex 200ms ease-out'
+          }}
+        />
+        {aiPanelOpen && (
+          <AiEditPanel
+            installId={app.installId}
+            appName={app.name}
+            onClose={() => setAiPanelOpen(false)}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
 
 /* ------------------------- BACKEND ERROR STATE ------------------------- */
+
+/* ------------------------- AI EDIT PANEL (CHAT SIDEBAR) ------------------------- */
+
+function AiEditPanel({ installId, appName, onClose }: {
+  installId: string;
+  appName: string;
+  onClose: () => void;
+}) {
+  const [turns, setTurns] = useState<EditTurn[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dropNotice, setDropNotice] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const dragCounterRef = useRef(0);
+
+  // Load existing session on mount
+  useEffect(() => {
+    getEditSession(installId)
+      .then(session => {
+        setSessionId(session.session_id);
+        setTurns(session.turns);
+      })
+      .catch(() => { /* no session yet */ });
+  }, [installId]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [turns]);
+
+  const handleSend = async () => {
+    const message = input.trim();
+    if (!message || loading) return;
+
+    // Add a placeholder turn immediately (user message shown, agent_reply pending)
+    const placeholderId = turns.length;
+    setTurns(prev => [...prev, {
+      turn_id: placeholderId,
+      user_message: message,
+      status: 'done',
+      files_changed: [],
+      tsc_ok: null,
+      tsc_errors: null,
+      agent_reply: null,
+      duration_ms: 0,
+    }]);
+    setInput('');
+    setLoading(true);
+
+    try {
+      const res = await sendEdit(installId, message, sessionId);
+      setSessionId(res.session_id);
+      // Replace the placeholder with the real response
+      setTurns(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...res.turn,
+          user_message: message,
+        };
+        return updated;
+      });
+    } catch (err) {
+      setTurns(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          status: 'error',
+          agent_reply: err instanceof Error ? err.message : 'Something went wrong. Try again.',
+        };
+        return updated;
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUndo = async (turnId: number) => {
+    try {
+      await undoEditTurn(installId, turnId);
+      setTurns(prev => prev.slice(0, turnId));
+    } catch {
+      // best-effort
+    }
+  };
+
+  // Drag-and-drop: copy files to the project's public/ folder
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) setIsDragging(true);
+  };
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current--;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setIsDragging(false);
+    }
+  };
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); };
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    dragCounterRef.current = 0;
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    try {
+      const req = (window as any).require;
+      if (!req) return;
+      const fs = req('fs');
+      const path = req('path');
+      const os = req('os');
+
+      const publicDir = path.join(os.homedir(), '.shirim', 'installs', installId, 'public');
+      if (!fs.existsSync(publicDir)) {
+        fs.mkdirSync(publicDir, { recursive: true });
+      }
+
+      const added: string[] = [];
+      for (const file of files) {
+        const srcPath = (file as any).path;
+        if (!srcPath) continue;
+        const dest = path.join(publicDir, file.name);
+        fs.copyFileSync(srcPath, dest);
+        added.push(file.name);
+      }
+
+      if (added.length > 0) {
+        // Touch a source file to trigger Vite's HMR, which causes Remotion
+        // Studio (and other dev servers) to re-scan the project and pick up
+        // the newly added assets in public/.
+        try {
+          const installDir = path.join(os.homedir(), '.shirim', 'installs', installId);
+          const candidates = ['src/Root.tsx', 'src/index.tsx', 'src/App.tsx', 'src/main.tsx'];
+          for (const c of candidates) {
+            const p = path.join(installDir, c);
+            if (fs.existsSync(p)) {
+              const now = new Date();
+              fs.utimesSync(p, now, now);
+              break;
+            }
+          }
+        } catch { /* best-effort HMR trigger */ }
+
+        const names = added.join(', ');
+        const label = added.length === 1
+          ? `I added "${added[0]}"`
+          : `I added ${added.length} files (${names})`;
+        setInput(label + ' — ');
+        setDropNotice(`✓ ${added.length === 1 ? added[0] : `${added.length} files`} added to project`);
+        setTimeout(() => setDropNotice(null), 4000);
+      }
+    } catch (err) {
+      console.error('Failed to copy files:', err);
+    }
+  };
+
+  const hasMessages = turns.length > 0;
+
+  return (
+    <div
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      style={{
+        width: '28%',
+        minWidth: '280px',
+        maxWidth: '380px',
+        display: 'flex',
+        flexDirection: 'column',
+        borderLeft: '1px solid var(--border)',
+        backgroundColor: 'var(--bg)',
+        flexShrink: 0,
+        position: 'relative'
+      }}>
+
+      {/* Drop zone overlay */}
+      {isDragging && (
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 10,
+          backgroundColor: 'var(--accent-glow)',
+          border: '2px dashed var(--accent)',
+          borderRadius: '8px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '10px',
+          pointerEvents: 'none'
+        }}>
+          <Download size={28} color="var(--accent)" />
+          <div style={{
+            fontSize: '14px',
+            fontWeight: 500,
+            color: 'var(--accent)'
+          }}>
+            Drop files to add to project
+          </div>
+          <div style={{
+            fontSize: '11px',
+            color: 'var(--text-muted)'
+          }}>
+            Files will be copied to the public/ folder
+          </div>
+        </div>
+      )}
+      {/* Header */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '14px 18px',
+        borderBottom: '1px solid var(--border)',
+        backgroundColor: 'var(--surface)'
+      }}>
+        <div>
+          <div style={{ fontSize: '14px', fontWeight: 500, color: 'var(--text-primary)' }}>
+            Edit with AI
+          </div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+            {appName}
+          </div>
+        </div>
+        <button onClick={onClose} style={{
+          width: '26px', height: '26px',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          borderRadius: '5px', border: '1px solid var(--border)',
+          backgroundColor: 'transparent', color: 'var(--text-muted)',
+          cursor: 'pointer', padding: 0
+        }}>
+          <X size={13} />
+        </button>
+      </div>
+
+      {/* Messages area */}
+      <div className="hide-scrollbar" style={{
+        flex: 1,
+        overflowY: 'auto',
+        padding: '18px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '14px'
+      }}>
+        {/* Empty state */}
+        {!hasMessages && (
+          <div style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            textAlign: 'center',
+            gap: '14px',
+            padding: '40px 20px',
+            color: 'var(--text-muted)'
+          }}>
+            <div style={{ fontSize: '22px' }}>✦</div>
+            <div style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
+              Edit with AI
+            </div>
+            <div style={{ fontSize: '12px', lineHeight: 1.6 }}>
+              Describe what you want to change,{'\n'}and I'll update the project for you.
+            </div>
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: '8px',
+              marginTop: '10px', width: '100%', maxWidth: '240px'
+            }}>
+              {['Make the text bigger', 'Change the background to dark blue', 'Add a fade transition between scenes'].map((ex, i) => (
+                <button
+                  key={i}
+                  onClick={() => { setInput(ex); }}
+                  style={{
+                    padding: '8px 14px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    backgroundColor: 'var(--surface-2)',
+                    color: 'var(--text-secondary)',
+                    fontSize: '11px',
+                    fontFamily: 'var(--font-pixel)',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'border-color 120ms ease-out'
+                  }}>
+                  "{ex}"
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Conversation turns */}
+        {turns.map(turn => (
+          <AiChatTurn
+            key={turn.turn_id}
+            turn={turn}
+            isLoading={loading && turn.agent_reply === null}
+            onUndo={() => handleUndo(turn.turn_id)}
+          />
+        ))}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Drop notice */}
+      {dropNotice && (
+        <div className="fade-in" style={{
+          padding: '8px 18px',
+          fontSize: '11px',
+          color: 'var(--accent)',
+          backgroundColor: 'var(--accent-glow)',
+          borderTop: '1px solid var(--border)',
+          fontFamily: 'var(--font-pixel)',
+          letterSpacing: '0.03em'
+        }}>
+          {dropNotice}
+        </div>
+      )}
+
+      {/* Input area */}
+      <div style={{
+        padding: '14px 18px',
+        borderTop: '1px solid var(--border)',
+        backgroundColor: 'var(--surface)'
+      }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'flex-end',
+          gap: '10px',
+          backgroundColor: 'var(--surface-2)',
+          border: `1px solid ${inputFocused ? 'var(--accent)' : 'var(--border)'}`,
+          boxShadow: inputFocused ? '0 0 0 3px var(--accent-glow)' : 'none',
+          borderRadius: '10px',
+          padding: '10px 14px',
+          transition: 'all 120ms ease-out'
+        }}>
+          <textarea
+            placeholder="Type a change..."
+            value={input}
+            onChange={(e) => {
+              setInput(e.target.value);
+              // Auto-expand: reset height to auto so scrollHeight recalculates,
+              // then set to scrollHeight (capped by maxHeight via CSS).
+              e.target.style.height = 'auto';
+              e.target.style.height = `${Math.min(e.target.scrollHeight, 140)}px`;
+            }}
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+                // Reset height after sending
+                (e.target as HTMLTextAreaElement).style.height = 'auto';
+              }
+            }}
+            rows={1}
+            style={{
+              flex: 1,
+              background: 'transparent',
+              border: 'none',
+              outline: 'none',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--font-pixel)',
+              fontSize: '13px',
+              resize: 'none',
+              maxHeight: '140px',
+              overflowY: 'auto',
+              lineHeight: 1.5
+            }}
+          />
+          <button
+            onClick={handleSend}
+            disabled={!input.trim() || loading}
+            style={{
+              width: '30px',
+              height: '30px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: '8px',
+              border: 'none',
+              background: !input.trim() || loading
+                ? 'var(--surface)'
+                : 'linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%)',
+              color: !input.trim() || loading ? 'var(--text-muted)' : 'var(--on-accent)',
+              cursor: !input.trim() || loading ? 'not-allowed' : 'pointer',
+              flexShrink: 0,
+              padding: 0
+            }}>
+            {loading ? (
+              <span className="spinner" style={{ display: 'inline-flex' }}>
+                <RefreshCw size={12} />
+              </span>
+            ) : (
+              <ChevronRight size={14} />
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AiChatTurn({
+  turn,
+  isLoading,
+  onUndo,
+}: {
+  turn: EditTurn;
+  isLoading: boolean;
+  onUndo: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const filesCount = turn.files_changed.length;
+
+  return (
+    <>
+      {/* User message bubble — right-aligned */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{
+          maxWidth: '88%',
+          padding: '11px 15px',
+          borderRadius: '12px 12px 4px 12px',
+          backgroundColor: 'var(--accent)',
+          color: 'var(--on-accent)',
+          fontSize: '13px',
+          lineHeight: 1.55,
+          wordBreak: 'break-word'
+        }}>
+          {turn.user_message}
+        </div>
+      </div>
+
+      {/* AI response bubble — left-aligned */}
+      <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+        <div style={{
+          maxWidth: '88%',
+          padding: '11px 15px',
+          borderRadius: '12px 12px 12px 4px',
+          backgroundColor: 'var(--surface-2)',
+          color: 'var(--text-primary)',
+          fontSize: '13px',
+          lineHeight: 1.55,
+          wordBreak: 'break-word'
+        }}>
+          {/* Typing indicator while waiting for response */}
+          {isLoading && !turn.agent_reply && (
+            <div style={{ display: 'flex', gap: '5px', alignItems: 'center', padding: '4px 0' }}>
+              {[0, 1, 2].map(i => (
+                <div
+                  key={i}
+                  className="pulse-dot"
+                  style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    backgroundColor: 'var(--text-muted)',
+                    animationDelay: `${i * 200}ms`
+                  }}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Agent reply text */}
+          {turn.agent_reply && (
+            <div>{turn.agent_reply}</div>
+          )}
+
+          {/* "What changed" expandable — NO filenames, just count */}
+          {turn.status === 'done' && filesCount > 0 && (
+            <div style={{ marginTop: '10px' }}>
+              <button
+                onClick={() => setExpanded(!expanded)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  background: 'none', border: 'none', padding: 0,
+                  color: 'var(--text-muted)', fontSize: '11px',
+                  cursor: 'pointer', fontFamily: 'var(--font-pixel)'
+                }}>
+                {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                {filesCount} {filesCount === 1 ? 'file' : 'files'} updated
+              </button>
+
+              {expanded && turn.duration_ms > 0 && (
+                <div style={{
+                  marginTop: '6px',
+                  fontSize: '11px',
+                  color: 'var(--text-muted)',
+                  paddingLeft: '18px'
+                }}>
+                  Completed in {(turn.duration_ms / 1000).toFixed(1)}s
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TypeScript warning — friendly, no raw errors */}
+          {turn.tsc_ok === false && (
+            <div style={{
+              marginTop: '8px',
+              display: 'flex', alignItems: 'center', gap: '6px',
+              fontSize: '11px',
+              color: 'var(--building)',
+              padding: '6px 10px',
+              backgroundColor: 'var(--surface)',
+              borderRadius: '6px',
+              border: '1px solid var(--border)'
+            }}>
+              <AlertTriangle size={11} />
+              Some type issues detected — the change might still work
+            </div>
+          )}
+
+          {/* Undo button */}
+          {turn.status === 'done' && turn.agent_reply && (
+            <button
+              onClick={onUndo}
+              style={{
+                marginTop: '8px',
+                display: 'flex', alignItems: 'center', gap: '5px',
+                background: 'none', border: 'none', padding: 0,
+                color: 'var(--text-muted)', fontSize: '11px',
+                cursor: 'pointer', fontFamily: 'var(--font-pixel)',
+                textDecoration: 'underline',
+                textUnderlineOffset: '3px',
+                textDecorationColor: 'transparent',
+                transition: 'text-decoration-color 180ms ease-out'
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.textDecorationColor = 'var(--text-muted)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.textDecorationColor = 'transparent'; }}>
+              Undo this change
+            </button>
+          )}
+
+          {/* Error state */}
+          {turn.status === 'error' && turn.agent_reply && (
+            <div style={{
+              marginTop: '6px',
+              display: 'flex', alignItems: 'center', gap: '6px',
+              fontSize: '11px', color: 'var(--error)'
+            }}>
+              <AlertTriangle size={12} />
+              Failed
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
 
 function BackendErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
