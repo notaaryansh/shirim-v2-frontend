@@ -2865,6 +2865,30 @@ function AiEditPanel({ installId, onClose }: {
   );
 }
 
+/** Sparkle braille animation — 6 frames of random twinkling dots at 150ms.
+ *  Frames extracted from unicode-animations (gunnargray-dev/unicode-animations). */
+const SPARKLE_FRAMES = ['⡡⠊⢔⠡', '⠊⡰⡡⡘', '⢔⢅⠈⢢', '⡁⢂⠆⡍', '⢔⠨⢑⢐', '⠨⡑⡠⠊'];
+
+function BrailleSparkle() {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setFrame(f => (f + 1) % SPARKLE_FRAMES.length), 150);
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <span style={{
+      fontFamily: 'monospace',
+      fontSize: '16px',
+      letterSpacing: '1px',
+      color: 'var(--text-muted)',
+      userSelect: 'none'
+    }}>
+      {SPARKLE_FRAMES[frame]}
+    </span>
+  );
+}
+
+
 function AiChatTurn({
   turn,
   isLoading,
@@ -2904,22 +2928,10 @@ function AiChatTurn({
         color: 'var(--text-primary)',
         wordBreak: 'break-word'
       }}>
-        {/* Typing indicator */}
+        {/* Thinking indicator — sparkle braille animation */}
         {isLoading && !turn.agent_reply && (
-          <div style={{ display: 'flex', gap: '5px', alignItems: 'center', padding: '4px 0' }}>
-            {[0, 1, 2].map(i => (
-              <div
-                key={i}
-                className="pulse-dot"
-                style={{
-                  width: '6px',
-                  height: '6px',
-                  borderRadius: '50%',
-                  backgroundColor: 'var(--text-muted)',
-                  animationDelay: `${i * 200}ms`
-                }}
-              />
-            ))}
+          <div style={{ padding: '4px 0' }}>
+            <BrailleSparkle />
           </div>
         )}
 
